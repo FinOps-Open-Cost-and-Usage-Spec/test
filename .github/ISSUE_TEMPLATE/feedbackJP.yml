@@ -1,8 +1,8 @@
-name: "Feature Request and Use Case Feedback"
+name: "Feedback JP test"
 description: "Provide feedback on unsupported FinOps features, use cases, or scenarios, as well as on the existing FOCUS specification content. Avoid sharing proprietary information."
 title: "[FEEDBACK]: "
 labels:
-  - "feedback"
+  - "feedbackTest"
 assignees:
   - "shawnalpay"
   - "jpradocueva"
