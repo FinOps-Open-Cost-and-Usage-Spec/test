@@ -1,0 +1,29 @@
+name: Log Column Change to Issue
+on:
+  project_next_item:
+    types: [edited]
+
+jobs:
+  comment_on_move:
+    runs-on: ubuntu-latest
+    if: github.event.changes.field_value.field_name == 'Status'
+    steps:
+      - name: Post Comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PROJECT_TRACKING_TOKEN }}
+          script: |
+            const itemName = context.payload.project_next_item.content_type;
+            const issueNumber = context.payload.project_next_item.content_node_id;
+            const newStatus = context.payload.changes.field_value.to;
+            const oldStatus = context.payload.changes.field_value.from;
+
+            // Only proceed if it's an Issue
+            if (itemName === 'Issue') {
+              github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: `📅 **Workflow Audit:** This item was moved from **${oldStatus}** to **${newStatus}**.`
+              });
+            }
