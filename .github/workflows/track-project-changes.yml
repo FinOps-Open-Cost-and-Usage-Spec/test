@@ -1,7 +1,8 @@
 name: Log Column Change to Issue
 on:
   issues:
-    types: edited
+    types: 
+       - edited
 
 jobs:
   comment_on_change:
