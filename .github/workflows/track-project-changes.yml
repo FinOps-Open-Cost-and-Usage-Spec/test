@@ -1,29 +1,37 @@
 name: Log Column Change to Issue
 on:
-  project_next_item:
+  repository_dispatch:
     types: [edited]
 
 jobs:
-  comment_on_move:
+  comment_on_change:
     runs-on: ubuntu-latest
-    if: github.event.changes.field_value.field_name == 'Status'
     steps:
-      - name: Post Comment
+      - name: Post comment on linked issue
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.PROJECT_TRACKING_TOKEN }}
           script: |
-            const itemName = context.payload.project_next_item.content_type;
-            const issueNumber = context.payload.project_next_item.content_node_id;
-            const newStatus = context.payload.changes.field_value.to;
-            const oldStatus = context.payload.changes.field_value.from;
+            const { item, changes } = context.payload;
+            
+            // 1. Check if the edited item is an Issue (not a Draft or PR)
+            if (item.content_type !== 'Issue') return;
 
-            // Only proceed if it's an Issue
-            if (itemName === 'Issue') {
-              github.rest.issues.createComment({
+            // 2. Identify what changed (e.g., a field named "Priority" or "Status")
+            // Note: GitHub's payload structure for project_item can be nested
+            const fieldName = changes.field_value?.field_name;
+            const newValue = changes.field_value?.field_value;
+
+            if (fieldName) {
+              const issueNumber = item.content_node_id; // Use GraphQL ID or parse from URL
+              const commentBody = `🤖 **Project Update:** Field *${fieldName}* was changed to **${newValue}**.`;
+
+              // 3. Post the comment
+              // Note: You'll need the repo owner and name from the item content
+              await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: issueNumber,
-                body: `📅 **Workflow Audit:** This item was moved from **${oldStatus}** to **${newStatus}**.`
+                issue_number: item.number,
+                body: commentBody
               });
             }
