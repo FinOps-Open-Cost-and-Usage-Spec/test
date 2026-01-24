@@ -11,7 +11,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
         run: |
-          # Fetching Select, Text, and Date values to cover all bases
           gh api graphql -f query='
             query($item_id: ID!) {
               node(id: $item_id) {
@@ -43,21 +42,18 @@ jobs:
           FIELD: ${{ github.event.client_payload.field_name }}
           ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
         run: |
-          # 1. Extract the NEW value (checks name, text, or date properties)
-          RAW_NEW_VAL=$(jq -r --arg FIELD "$FIELD" '
-            .data.node.fieldValues.nodes[] 
-            | select(.field.name == $FIELD) 
-            | (.name // .text // .date // "None")
-          ' data.json)
+          # 1. Extract the NEW value from the fetched JSON
+          RAW_NEW_VAL=$(jq -r --arg FIELD "$FIELD" '.data.node.fieldValues.nodes[] | select(.field.name == $FIELD) | (.name // .text // .date // "None")' data.json)
 
-          # 2. Trim date section after "T" for both Old and New values
+          # 2. Trim date section after "T" for both values
+          # This works even if there is no "T" (like in a Status field)
           NEW_VAL_CLEAN="${RAW_NEW_VAL%%T*}"
           OLD_VAL_CLEAN="${OLD_VAL%%T*}"
 
           # 3. Create the comment body
           COMMENT_BODY="🔄 **Project Update:** Field '$FIELD' changed from **$OLD_VAL_CLEAN** to **$NEW_VAL_CLEAN**."
 
-          # 4. Post the comment
+          # 4. Post the comment via GraphQL
           gh api graphql -f query='
             mutation($subjectId: ID!, $body: String!) {
               addComment(input: {subjectId: $subjectId, body: $body}) {
