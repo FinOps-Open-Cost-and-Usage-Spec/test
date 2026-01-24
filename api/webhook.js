@@ -17,15 +17,22 @@ export default async function handler(req, res) {
   const contentNodeId = projects_v2_item.content_node_id || projects_v2_item.content?.node_id || null;
 
   if (action !== 'edited' || !contentNodeId) {
-    return res.status(200).send('Action ignored.');
+    return res.status(200).send('Action ignored: Not an edit or missing content ID.');
   }
 
-  // 3. Extract the User who made the change
-  const userWhoChanged = sender?.login || "Unknown User";
+  // 3. Check the Field Name
+  const fieldName = changes?.field_value?.field_name || "Unknown Field";
 
-  // 4. Handle Old Value Logic
+  // NEW: Ignore updates to the "Status" field
+  if (fieldName === "Status") {
+    return res.status(200).send('Action ignored: Changes to the Status field are excluded.');
+  }
+
+  // 4. Extract User and Old Value
+  const userWhoChanged = sender?.login || "Unknown User";
   let oldValue = "None";
   const rawFrom = changes?.field_value?.from;
+
   if (rawFrom !== undefined && rawFrom !== null) {
     if (typeof rawFrom === 'object') {
       oldValue = rawFrom.name || rawFrom.text || "None";
@@ -34,9 +41,7 @@ export default async function handler(req, res) {
     }
   }
 
-  const fieldName = changes?.field_value?.field_name || "Unknown Field";
-
-  // 5. Dispatch
+  // 5. Dispatch to GitHub Actions
   try {
     await fetch(`https://api.github.com/repos/FinOps-Open-Cost-and-Usage-Spec/test/dispatches`, {
       method: 'POST',
@@ -53,12 +58,12 @@ export default async function handler(req, res) {
           content_node_id: projects_v2_item.content_node_id || projects_v2_item.content?.node_id || null,
           field_name: fieldName,
           old_value: oldValue,
-          changed_by: userWhoChanged // New field
+          changed_by: userWhoChanged
         }
       })
     });
-    return res.status(200).send('Dispatched.');
+    return res.status(200).send(`Dispatched: ${fieldName} update.`);
   } catch (error) {
-    return res.status(500).send('Error.');
+    return res.status(500).send('Internal Server Error.');
   }
 }
