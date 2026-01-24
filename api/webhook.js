@@ -13,35 +13,38 @@ export default async function handler(req, res) {
 
   // 2. Extract Data
   const { action, projects_v2_item, changes, sender } = req.body;
-
-  const contentNodeId = projects_v2_item.content_node_id || projects_v2_item.content?.node_id || null;
+  const contentNodeId = projects_v2_item?.content_node_id || projects_v2_item?.content?.node_id || null;
 
   if (action !== 'edited' || !contentNodeId) {
     return res.status(200).send('Action ignored: Not an edit or missing content ID.');
   }
 
-  // 3. Check the Field Name
+  // 3. Extract Field Name and check exclusions
   const fieldName = changes?.field_value?.field_name || "Unknown Field";
-
-  // NEW: Ignore updates to the "Status" field
   if (fieldName === "Status") {
-    return res.status(200).send('Action ignored: Changes to the Status field are excluded.');
+    return res.status(200).send('Action ignored: Status field excluded.');
   }
 
-  // 4. Extract User and Old Value
-  const userWhoChanged = sender?.login || "Unknown User";
-  let oldValue = "None";
-  const rawFrom = changes?.field_value?.from;
-
-  if (rawFrom !== undefined && rawFrom !== null) {
-    if (typeof rawFrom === 'object') {
-      oldValue = rawFrom.name || rawFrom.text || "None";
-    } else {
-      oldValue = String(rawFrom).split('T')[0];
+  // 4. Robust Value Parsing Helper
+  const parseVal = (val) => {
+    if (val === undefined || val === null) return "None";
+    // Handle objects (Single Select fields)
+    if (typeof val === 'object') {
+      return val.name || val.text || val.date || "None";
     }
+    // Handle strings (Dates/Text) and strip timestamps
+    return String(val).split('T')[0].split('+')[0];
+  };
+
+  const oldValue = parseVal(changes?.field_value?.from);
+  const newValue = parseVal(changes?.field_value?.to);
+
+  // 5. Short-circuit if no actual change detected (to prevent ghost comments)
+  if (oldValue === newValue) {
+    return res.status(200).send('Action ignored: No meaningful value change.');
   }
 
-  // 5. Dispatch to GitHub Actions
+  // 6. Dispatch to GitHub Actions
   try {
     await fetch(`https://api.github.com/repos/FinOps-Open-Cost-and-Usage-Spec/test/dispatches`, {
       method: 'POST',
@@ -55,15 +58,17 @@ export default async function handler(req, res) {
         event_type: 'project_field_updated',
         client_payload: {
           item_node_id: projects_v2_item.node_id,
-          content_node_id: projects_v2_item.content_node_id || projects_v2_item.content?.node_id || null,
+          content_node_id: contentNodeId,
           field_name: fieldName,
           old_value: oldValue,
-          changed_by: userWhoChanged
+          new_value: newValue,
+          changed_by: sender?.login || "Unknown User"
         }
       })
     });
-    return res.status(200).send(`Dispatched: ${fieldName} update.`);
+    return res.status(200).send(`Dispatched: ${fieldName} update (${oldValue} -> ${newValue}).`);
   } catch (error) {
+    console.error(error);
     return res.status(500).send('Internal Server Error.');
   }
 }
