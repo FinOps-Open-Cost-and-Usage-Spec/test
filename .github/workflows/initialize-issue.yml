@@ -11,77 +11,80 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
           ORG: "FinOps-Open-Cost-and-Usage-Spec"
-          PRJ_NUM: 1
+          PRJ_NUM: 7
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
         run: |
           set -e
 
-          # 1. Fetch Field IDs and the Parent's Task Force value in one shot
-          echo "Fetching metadata and parent value..."
-          QUERY_DATA=$(gh api graphql -f query='
-            query($issue_id: ID!, $org: String!, $num: Int!) {
-              organization(login: $org) {
-                projectV2(number: $num) {
-                  id
-                  ai_field: field(name: "AI Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
-                  tf_field: field(name: "Task Force") { ... on ProjectV2SingleSelectField { id } }
-                }
+          # 1. Define the GraphQL query using a Heredoc to avoid shell syntax errors
+          # This query gets project metadata and the parent's Task Force value
+          read -r -d '' QUERY << 'EOF' || true
+          query($issue_id: ID!, $org: String!, $num: Int!) {
+            organization(login: $org) {
+              projectV2(number: $num) {
+                id
+                ai_field: field(name: "AI Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
+                tf_field: field(name: "Task Force") { ... on ProjectV2SingleSelectField { id } }
               }
-              node(id: $issue_id) {
-                ... on Issue {
-                  # Get this issue's project item ID (Auto-added by GitHub)
-                  projectItems(first: 10) {
+            }
+            node(id: $issue_id) {
+              ... on Issue {
+                projectItems(first: 5) {
+                  nodes { id project { number } }
+                }
+                parent {
+                  projectItems(first: 5) {
                     nodes {
-                      id
                       project { number }
-                    }
-                  }
-                  # Get the Parent's Task Force value directly
-                  parent {
-                    projectItems(first: 10) {
-                      nodes {
-                        project { number }
-                        fieldValueByName(name: "Task Force") {
-                          ... on ProjectV2ItemFieldSingleSelectValue { optionId }
-                        }
+                      fieldValueByName(name: "Task Force") {
+                        ... on ProjectV2ItemFieldSingleSelectValue { optionId }
                       }
                     }
                   }
                 }
               }
-            }' -f issue_id="${{ github.event.issue.node_id }}" -f org="$ORG" -F num=$PRJ_NUM)
+            }
+          }
+          EOF
 
-          # 2. Extract IDs
+          # 2. Polling Loop: Wait for Auto-Add to finish
+          # Even with "Auto-add", the project item isn't always ready the instant the issue opens
+          ITEM_ID=""
+          for i in {1..2}; do
+            echo "Fetching data (Attempt $i)..."
+            QUERY_DATA=$(gh api graphql -f query="$QUERY" -f issue_id="$ISSUE_NODE_ID" -f org="$ORG" -F num=$PRJ_NUM)
+            
+            # Extract Card ID for this project
+            ITEM_ID=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.projectItems.nodes[] | select(.project.number == $NUM) | .id // empty')
+            
+            if [ -n "$ITEM_ID" ]; then
+              echo "Project Item found: $ITEM_ID"
+              break
+            fi
+            echo "Waiting for Auto-add to sync..."
+            sleep 5
+          done
+
+          if [ -z "$ITEM_ID" ]; then
+            echo "Error: Issue not found in Project $PRJ_NUM after 10s. Check auto-add settings."
+            exit 1
+          fi
+
+          # 3. Extract Field and Option IDs
           PRJ_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.id')
           AI_FIELD_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.ai_field.id')
           AI_OPEN_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.ai_field.options[] | select(.name=="Open") | .id')
           TF_FIELD_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.tf_field.id')
-
-          # Find THIS issue's project item ID
-          ITEM_ID=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.projectItems.nodes[] | select(.project.number == $NUM) | .id // empty')
-          
-          # Find the PARENT'S Task Force option ID
           PARENT_TF_VALUE=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.parent.projectItems.nodes[]? | select(.project.number == $NUM) | .fieldValueByName.optionId // empty')
 
-          # 3. Guard: If GitHub auto-add is slightly slower than the workflow, wait 5s and try to get ITEM_ID once more
-          if [ -z "$ITEM_ID" ]; then
-            echo "Project Item not found yet. Sleeping 5s for auto-add sync..."
-            sleep 5
-            ITEM_ID=$(gh api graphql -f query='query($id: ID!, $num: Int!) { node(id: $id) { ... on Issue { projectItems(first: 10) { nodes { id project { number } } } } } }' -f id="${{ github.event.issue.node_id }}" -F num=$PRJ_NUM | jq -r --argjson NUM "$PRJ_NUM" '.data.node.projectItems.nodes[] | select(.project.number == $NUM) | .id // empty')
-          fi
-
-          if [ -z "$ITEM_ID" ]; then
-            echo "Error: Issue is not in Project $PRJ_NUM. Check auto-add settings."
-            exit 1
-          fi
-
-          # 4. Set AI Status to Open
-          echo "Setting AI Status..."
+          # 4. Update AI Status
+          echo "Setting AI Status to Open..."
           gh api graphql -f query='
             mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
               updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { clientMutationId }
             }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$AI_FIELD_ID" -f option="$AI_OPEN_ID"
 
-          # 5. Set Task Force (Inherit)
+          # 5. Update Task Force (If parent value exists)
           if [ -n "$PARENT_TF_VALUE" ] && [ "$PARENT_TF_VALUE" != "null" ]; then
             echo "Inheriting Task Force..."
             gh api graphql -f query='
