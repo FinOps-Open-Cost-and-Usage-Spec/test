@@ -9,7 +9,7 @@ jobs:
     steps:
       - name: Fetch New Value
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_TRACKING_TOKEN }}
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
         run: |
           # Fetch the current (new) value of the field that changed
           gh api graphql -f query='
@@ -30,7 +30,7 @@ jobs:
 
       - name: Post Comment
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_TRACKING_TOKEN }}
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
           OLD_VAL: ${{ github.event.client_payload.old_value }}
           FIELD: ${{ github.event.client_payload.field_name }}
           ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
