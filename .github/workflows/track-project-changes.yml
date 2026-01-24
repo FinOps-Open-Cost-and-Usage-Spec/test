@@ -32,11 +32,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
           OLD_VAL: ${{ github.event.client_payload.old_value }}
+          NEW_VAL: ${{ github.event.client_payload.new_value }}
           FIELD: ${{ github.event.client_payload.field_name }}
           ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
         run: |
           # Extract the NEW value from the JSON we just fetched
-          NEW_VAL=$(jq -r --arg FIELD "$FIELD" '.data.node.fieldValues.nodes[] | select(.field.name==$FIELD) | .name' data.json)
+          # NEW_VAL=$(jq -r --arg FIELD "$FIELD" '.data.node.fieldValues.nodes[] | select(.field.name==$FIELD) | .name' data.json)
           
           # Create the comment body
           COMMENT_BODY="🔄 **Project Update:** Field '$FIELD' changed from **$OLD_VAL** to **$NEW_VAL**."
