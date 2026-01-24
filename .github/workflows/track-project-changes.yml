@@ -11,6 +11,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
         run: |
+          # Fetching the current state of the item to get the "New Value"
           gh api graphql -f query='
             query($item_id: ID!) {
               node(id: $item_id) {
@@ -41,18 +42,26 @@ jobs:
           OLD_VAL: "${{ github.event.client_payload.old_value }}"
           FIELD: "${{ github.event.client_payload.field_name }}"
           ISSUE_ID: "${{ github.event.client_payload.content_node_id }}"
+          USER_LOGIN: "${{ github.event.client_payload.changed_by }}"
         run: |
-          # 1. Extract the NEW value (Select, Text, or Date)
-          RAW_NEW_VAL=$(jq -r --arg FIELD "$FIELD" '.data.node.fieldValues.nodes[] | select(.field.name == $FIELD) | (.name // .text // .date // "None")' data.json)
+          # 1. Extract the NEW value from the JSON using jq
+          # It checks for .name (Select), .text (Text), or .date (Date)
+          RAW_NEW_VAL=$(jq -r --arg FIELD "$FIELD" '
+            .data.node.fieldValues.nodes[] 
+            | select(.field.name == $FIELD) 
+            | (.name // .text // .date // "None")
+          ' data.json)
 
-          # 2. Trim date section after "T"
+          # 2. Trim date section after "T" for both Old and New values
+          # This keeps the comment clean (e.g., 2026-01-23 instead of 2026-01-23T00:00:00Z)
           NEW_VAL_CLEAN="${RAW_NEW_VAL%%T*}"
           OLD_VAL_CLEAN="${OLD_VAL%%T*}"
 
           # 3. Create the comment body
-          COMMENT_BODY="🔄 **Project Update:** Field '$FIELD' changed from **$OLD_VAL_CLEAN** to **$NEW_VAL_CLEAN**."
+          # Attributing the change to the user who performed it in the project
+          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: ~~$OLD_VAL_CLEAN~~ → **$NEW_VAL_CLEAN**"
 
-          # 4. Post the comment
+          # 4. Post the comment via GraphQL mutation
           gh api graphql -f query='
             mutation($subjectId: ID!, $body: String!) {
               addComment(input: {subjectId: $subjectId, body: $body}) {
