@@ -7,64 +7,74 @@ jobs:
   comment_change:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch New Value
+      - name: Fetch Current State (as User)
+        id: fetch_state
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          ITEM_ID: ${{ github.event.client_payload.item_node_id }}
+          FIELD_NAME: ${{ github.event.client_payload.field_name }}
         run: |
-          # Fetching the current state of the item to get the "New Value"
-          gh api graphql -f query='
-            query($item_id: ID!) {
-              node(id: $item_id) {
-                ... on ProjectV2Item {
-                  fieldValues(first: 20) {
-                    nodes {
-                      ... on ProjectV2ItemFieldSingleSelectValue {
-                        name
-                        field { ... on ProjectV2FieldCommon { name } }
-                      }
-                      ... on ProjectV2ItemFieldTextValue {
-                        text
-                        field { ... on ProjectV2FieldCommon { name } }
-                      }
-                      ... on ProjectV2ItemFieldDateValue {
-                        date
-                        field { ... on ProjectV2FieldCommon { name } }
-                      }
+          set -e
+
+          # Query to fetch the new values from the project
+          read -r -d '' QUERY << 'EOF' || true
+          query($item_id: ID!) {
+            node(id: $item_id) {
+              ... on ProjectV2Item {
+                fieldValues(first: 20) {
+                  nodes {
+                    ... on ProjectV2ItemFieldSingleSelectValue {
+                      name
+                      field { ... on ProjectV2FieldCommon { name } }
+                    }
+                    ... on ProjectV2ItemFieldTextValue {
+                      text
+                      field { ... on ProjectV2FieldCommon { name } }
+                    }
+                    ... on ProjectV2ItemFieldDateValue {
+                      date
+                      field { ... on ProjectV2FieldCommon { name } }
                     }
                   }
                 }
               }
-            }' -f item_id="${{ github.event.client_payload.item_node_id }}" > data.json
+            }
+          }
+          EOF
 
-      - name: Post Comment
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OLD_VAL: "${{ github.event.client_payload.old_value }}"
-          FIELD: "${{ github.event.client_payload.field_name }}"
-          ISSUE_ID: "${{ github.event.client_payload.content_node_id }}"
-          USER_LOGIN: "${{ github.event.client_payload.changed_by }}"
-        run: |
-          # 1. Extract the NEW value from the JSON using jq
-          # It checks for .name (Select), .text (Text), or .date (Date)
-          RAW_NEW_VAL=$(jq -r --arg FIELD "$FIELD" '
+          QUERY_DATA=$(gh api graphql -f query="$QUERY" -f item_id="$ITEM_ID")
+          
+          # Extract and clean new value
+          RAW_NEW_VAL=$(echo "$QUERY_DATA" | jq -r --arg FIELD "$FIELD_NAME" '
             .data.node.fieldValues.nodes[] 
             | select(.field.name == $FIELD) 
             | (.name // .text // .date // "None")
-          ' data.json)
+          ')
+          
+          # Export to environment for next step
+          echo "NEW_VAL_CLEAN=${RAW_NEW_VAL%%T*}" >> $GITHUB_ENV
 
-          # 2. Trim date section after "T" for both Old and New values
-          # This keeps the comment clean (e.g., 2026-01-23 instead of 2026-01-23T00:00:00Z)
-          NEW_VAL_CLEAN="${RAW_NEW_VAL%%T*}"
-          OLD_VAL_CLEAN="${OLD_VAL%%T*}"
+      - name: Post Comment (as Bot)
+        env:
+          # Using GITHUB_TOKEN here changes the identity to github-actions[bot]
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
+          FIELD: ${{ github.event.client_payload.field_name }}
+          OLD_VAL: ${{ github.event.client_payload.old_value }}
+          USER_LOGIN: ${{ github.event.client_payload.changed_by }}
+        run: |
+          set -e
+          
+          # Final cleanup for the 'None' fallback
+          FINAL_NEW="${NEW_VAL_CLEAN:-None}"
+          OLD_CLEAN="${OLD_VAL%%T*}"
+          FINAL_OLD="${OLD_CLEAN:-None}"
+          [ "$FINAL_NEW" == "null" ] && FINAL_NEW="None"
+          [ "$FINAL_OLD" == "null" ] && FINAL_OLD="None"
 
-          # 3. Create the comment body
-          # Attributing the change to the user who performed it in the project
-          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $OLD_VAL_CLEAN → **$NEW_VAL_CLEAN**"
+          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $FINAL_OLD → **$FINAL_NEW**"
 
-          # 4. Post the comment via GraphQL mutation
           gh api graphql -f query='
             mutation($subjectId: ID!, $body: String!) {
-              addComment(input: {subjectId: $subjectId, body: $body}) {
-                clientMutationId
-              }
+              addComment(input: {subjectId: $subjectId, body: $body}) { clientMutationId }
             }' -f subjectId="$ISSUE_ID" -f body="$COMMENT_BODY"
