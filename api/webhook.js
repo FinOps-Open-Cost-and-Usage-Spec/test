@@ -32,7 +32,7 @@ export default async function handler(req, res) {
         client_payload: {
           item_node_id: projects_v2_item.node_id,
           project_node_id: projects_v2_item.project_node_id,
-          content_node_id: projects_v2_item.content_node_id,
+          content_node_id: projects_v2_item.content_node_id || projects_v2_item.content?.node_id || null,
           old_value: changes?.field_value?.from || "Unknown",
           field_name: changes?.field_value?.field_name || "Unknown"
         }
