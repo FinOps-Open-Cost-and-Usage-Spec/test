@@ -37,7 +37,7 @@ jobs:
 
       - name: Post Comment
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OLD_VAL: "${{ github.event.client_payload.old_value }}"
           FIELD: "${{ github.event.client_payload.field_name }}"
           ISSUE_ID: "${{ github.event.client_payload.content_node_id }}"
