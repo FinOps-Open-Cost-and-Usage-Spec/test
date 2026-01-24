@@ -7,7 +7,7 @@ jobs:
   comment_change:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch Current State (as User)
+      - name: Fetch and Process Change
         id: fetch_state
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
@@ -16,7 +16,12 @@ jobs:
         run: |
           set -e
 
-          # Query to fetch the new values from the project
+          # 1. Wait a moment for the API to reflect the change
+          # This prevents "None -> None" during automated updates
+          echo "Waiting 5s for API sync..."
+          sleep 5
+
+          # 2. Query the current state
           read -r -d '' QUERY << 'EOF' || true
           query($item_id: ID!) {
             node(id: $item_id) {
@@ -51,12 +56,10 @@ jobs:
             | (.name // .text // .date // "None")
           ')
           
-          # Export to environment for next step
           echo "NEW_VAL_CLEAN=${RAW_NEW_VAL%%T*}" >> $GITHUB_ENV
 
       - name: Post Comment (as Bot)
         env:
-          # Using GITHUB_TOKEN here changes the identity to github-actions[bot]
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
           FIELD: ${{ github.event.client_payload.field_name }}
@@ -65,16 +68,25 @@ jobs:
         run: |
           set -e
           
-          # Final cleanup for the 'None' fallback
+          # 1. Clean up values
           FINAL_NEW="${NEW_VAL_CLEAN:-None}"
           OLD_CLEAN="${OLD_VAL%%T*}"
           FINAL_OLD="${OLD_CLEAN:-None}"
+          
+          # Convert "null" strings to "None"
           [ "$FINAL_NEW" == "null" ] && FINAL_NEW="None"
           [ "$FINAL_OLD" == "null" ] && FINAL_OLD="None"
 
-          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $FINAL_OLD → **$FINAL_NEW**"
+          # 2. THE SHORT-CIRCUIT: Skip if no actual change is detected
+          if [ "$FINAL_NEW" == "$FINAL_OLD" ]; then
+            echo "New value ($FINAL_NEW) matches old value ($FINAL_OLD). Skipping comment to avoid noise."
+            exit 0
+          fi
 
+          # 3. Post the comment
+          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $FINAL_OLD → **$FINAL_NEW**"
+          
           gh api graphql -f query='
-            mutation($subjectId: ID!, $body: String!) {
-              addComment(input: {subjectId: $subjectId, body: $body}) { clientMutationId }
-            }' -f subjectId="$ISSUE_ID" -f body="$COMMENT_BODY"
+            mutation($id: ID!, $body: String!) {
+              addComment(input: {subjectId: $id, body: $body}) { clientMutationId }
+            }' -f id="$ISSUE_ID" -f body="$COMMENT_BODY"
