@@ -11,7 +11,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
           ORG: "FinOps-Open-Cost-and-Usage-Spec"
-          PRJ_NUM: 1
+          PRJ_NUM: 7
         run: |
           # Use -e to exit on error and -x to print commands (good for debugging)
           set -e
