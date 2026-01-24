@@ -7,23 +7,36 @@ jobs:
   comment_change:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch Current State
-        id: fetch_state
+      - name: Extract Variables and Fetch State
+        id: process
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
-          ITEM_ID: ${{ github.event.client_payload.projects_v2_item.node_id }}
-          FIELD_NAME: ${{ github.event.client_payload.changes.field_value.field_name }}
+          # Pass the entire event to a file so we can find the data anywhere
+          EVENT_JSON: ${{ toJson(github.event.client_payload) }}
         run: |
           set -e
 
-          if [ -z "$ITEM_ID" ]; then
-            echo "Error: ITEM_ID is empty. Check payload structure."
+          # 1. Use jq to find the values regardless of where they are nested
+          # This looks for node_id and content_node_id anywhere in the payload
+          ITEM_ID=$(echo "$EVENT_JSON" | jq -r '.. | .node_id? // empty' | head -n 1)
+          ISSUE_ID=$(echo "$EVENT_JSON" | jq -r '.. | .content_node_id? // empty' | head -n 1)
+          FIELD_NAME=$(echo "$EVENT_JSON" | jq -r '.. | .field_name? // empty' | head -n 1)
+          USER_LOGIN=$(echo "$EVENT_JSON" | jq -r '.. | .login? // empty' | head -n 1)
+          
+          # Extract the 'from' value as a JSON string for later processing
+          FROM_JSON=$(echo "$EVENT_JSON" | jq -c '.. | .from? // empty' | head -n 1)
+
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
+            echo "Error: Could not find node_id in the payload."
+            echo "Debug Payload: $EVENT_JSON"
             exit 1
           fi
 
+          echo "Found ITEM_ID: $ITEM_ID"
           echo "Waiting 5s for API sync..."
           sleep 5
 
+          # 2. Query GitHub for the NEW state
           read -r -d '' QUERY << 'EOF' || true
           query($item_id: ID!, $field_name: String!) {
             node(id: $item_id) {
@@ -40,52 +53,45 @@ jobs:
 
           QUERY_DATA=$(gh api graphql -f query="$QUERY" -f item_id="$ITEM_ID" -f field_name="$FIELD_NAME")
           
-          # Extract NEW value: Handle the object or the primitive
+          # Extract and clean NEW value
           RAW_NEW_VAL=$(echo "$QUERY_DATA" | jq -r '.data.node.fieldValueByName | if type == "object" then (.name // .text // .date // "None") else "None" end')
-          
-          # Trim date timestamps (handles both T00:00 and +00:00)
           CLEAN_NEW="${RAW_NEW_VAL%%T*}"
           CLEAN_NEW="${CLEAN_NEW%%+*}"
-          
-          echo "NEW_VAL_FINAL=${CLEAN_NEW:-None}" >> $GITHUB_ENV
+
+          # 3. Process OLD value
+          FINAL_OLD=$(echo "$FROM_JSON" | jq -r '
+            if type == "object" then (.name // .text // .date // "None")
+            elif type == "string" then .
+            else "None" end
+          ')
+          FINAL_OLD="${FINAL_OLD%%T*}"
+          FINAL_OLD="${FINAL_OLD%%+*}"
+
+          # Save everything to environment for the final step
+          {
+            echo "FINAL_NEW=${CLEAN_NEW:-None}"
+            echo "FINAL_OLD=${FINAL_OLD:-None}"
+            echo "ISSUE_ID=$ISSUE_ID"
+            echo "FIELD_NAME=$FIELD_NAME"
+            echo "USER_LOGIN=$USER_LOGIN"
+          } >> "$GITHUB_ENV"
 
       - name: Post Comment (as Bot)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_ID: ${{ github.event.client_payload.projects_v2_item.content_node_id }}
-          FIELD: ${{ github.event.client_payload.changes.field_value.field_name }}
-          # Pass 'from' as raw JSON to handle objects, strings, or nulls
-          FROM_JSON: ${{ toJson(github.event.client_payload.changes.field_value.from) }}
-          USER_LOGIN: ${{ github.event.client_payload.sender.login }}
         run: |
           set -e
           
-          # Logic Gate: If object, grab the name/text/date. If string/primitive, use it.
-          FINAL_OLD=$(echo "$FROM_JSON" | jq -r '
-            if type == "object" then 
-              (.name // .text // .date // "None")
-            elif type == "string" then 
-              . 
-            else 
-              "None" 
-            end
-          ')
+          # Clean literal "null" strings
+          [ "$FINAL_NEW" == "null" ] && FINAL_NEW="None"
+          [ "$FINAL_OLD" == "null" ] && FINAL_OLD="None"
 
-          # Trim timestamps from OLD value (handles both T and + offsets)
-          FINAL_OLD="${FINAL_OLD%%T*}"
-          FINAL_OLD="${FINAL_OLD%%+*}"
-          
-          # Final Null Check
-          [ "$FINAL_OLD" == "null" ] || [ -z "$FINAL_OLD" ] && FINAL_OLD="None"
-          [ "$NEW_VAL_FINAL" == "null" ] && NEW_VAL_FINAL="None"
-
-          # Avoid "None -> None" or redundant updates
-          if [ "$NEW_VAL_FINAL" == "$FINAL_OLD" ]; then
-            echo "No change detected ($FINAL_OLD to $NEW_VAL_FINAL). Skipping."
+          if [ "$FINAL_NEW" == "$FINAL_OLD" ]; then
+            echo "No change detected ($FINAL_OLD -> $FINAL_NEW). Skipping."
             exit 0
           fi
 
-          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $FINAL_OLD → **$NEW_VAL_FINAL**"
+          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD_NAME**: $FINAL_OLD → **$FINAL_NEW**"
           
           gh api graphql -f query='
             mutation($id: ID!, $body: String!) {
