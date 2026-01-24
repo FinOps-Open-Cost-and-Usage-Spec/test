@@ -7,36 +7,24 @@ jobs:
   comment_change:
     runs-on: ubuntu-latest
     steps:
-      - name: Extract Variables and Fetch State
+      - name: Fetch and Process Change
         id: process
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
-          # Pass the entire event to a file so we can find the data anywhere
-          EVENT_JSON: ${{ toJson(github.event.client_payload) }}
+          # These keys now match your webhook.js JSON.stringify exactly
+          ITEM_ID: ${{ github.event.client_payload.item_node_id }}
+          ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
+          FIELD_NAME: ${{ github.event.client_payload.field_name }}
+          USER_LOGIN: ${{ github.event.client_payload.changed_by }}
+          OLD_VAL: ${{ github.event.client_payload.old_value }}
         run: |
           set -e
 
-          # 1. Use jq to find the values regardless of where they are nested
-          # This looks for node_id and content_node_id anywhere in the payload
-          ITEM_ID=$(echo "$EVENT_JSON" | jq -r '.. | .node_id? // empty' | head -n 1)
-          ISSUE_ID=$(echo "$EVENT_JSON" | jq -r '.. | .content_node_id? // empty' | head -n 1)
-          FIELD_NAME=$(echo "$EVENT_JSON" | jq -r '.. | .field_name? // empty' | head -n 1)
-          USER_LOGIN=$(echo "$EVENT_JSON" | jq -r '.. | .login? // empty' | head -n 1)
-          
-          # Extract the 'from' value as a JSON string for later processing
-          FROM_JSON=$(echo "$EVENT_JSON" | jq -c '.. | .from? // empty' | head -n 1)
-
-          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
-            echo "Error: Could not find node_id in the payload."
-            echo "Debug Payload: $EVENT_JSON"
-            exit 1
-          fi
-
-          echo "Found ITEM_ID: $ITEM_ID"
+          echo "Fetching latest state for Item: $ITEM_ID"
           echo "Waiting 5s for API sync..."
           sleep 5
 
-          # 2. Query GitHub for the NEW state
+          # 1. Query the CURRENT (New) state from GitHub
           read -r -d '' QUERY << 'EOF' || true
           query($item_id: ID!, $field_name: String!) {
             node(id: $item_id) {
@@ -53,45 +41,40 @@ jobs:
 
           QUERY_DATA=$(gh api graphql -f query="$QUERY" -f item_id="$ITEM_ID" -f field_name="$FIELD_NAME")
           
-          # Extract and clean NEW value
-          RAW_NEW_VAL=$(echo "$QUERY_DATA" | jq -r '.data.node.fieldValueByName | if type == "object" then (.name // .text // .date // "None") else "None" end')
+          # 2. Extract and clean the NEW value
+          # Your webhook already cleaned the OLD value, but we must clean the NEW one here.
+          RAW_NEW_VAL=$(echo "$QUERY_DATA" | jq -r '.data.node.fieldValueByName | if type == "object" then (.name // .text // .date // "None") else (. // "None") end')
+          
+          # Strip timestamps and timezone offsets
           CLEAN_NEW="${RAW_NEW_VAL%%T*}"
           CLEAN_NEW="${CLEAN_NEW%%+*}"
 
-          # 3. Process OLD value
-          FINAL_OLD=$(echo "$FROM_JSON" | jq -r '
-            if type == "object" then (.name // .text // .date // "None")
-            elif type == "string" then .
-            else "None" end
-          ')
-          FINAL_OLD="${FINAL_OLD%%T*}"
-          FINAL_OLD="${FINAL_OLD%%+*}"
-
-          # Save everything to environment for the final step
+          # 3. Finalize variables for the next step
           {
             echo "FINAL_NEW=${CLEAN_NEW:-None}"
-            echo "FINAL_OLD=${FINAL_OLD:-None}"
-            echo "ISSUE_ID=$ISSUE_ID"
-            echo "FIELD_NAME=$FIELD_NAME"
-            echo "USER_LOGIN=$USER_LOGIN"
+            echo "FINAL_OLD=${OLD_VAL:-None}"
           } >> "$GITHUB_ENV"
 
       - name: Post Comment (as Bot)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
+          FIELD: ${{ github.event.client_payload.field_name }}
+          USER_LOGIN: ${{ github.event.client_payload.changed_by }}
         run: |
           set -e
           
-          # Clean literal "null" strings
-          [ "$FINAL_NEW" == "null" ] && FINAL_NEW="None"
-          [ "$FINAL_OLD" == "null" ] && FINAL_OLD="None"
+          # Standardization
+          [ "$FINAL_NEW" == "null" ] || [ -z "$FINAL_NEW" ] && FINAL_NEW="None"
+          [ "$FINAL_OLD" == "null" ] || [ -z "$FINAL_OLD" ] && FINAL_OLD="None"
 
+          # 4. Short-circuit if no change is detected (Race Condition Guard)
           if [ "$FINAL_NEW" == "$FINAL_OLD" ]; then
-            echo "No change detected ($FINAL_OLD -> $FINAL_NEW). Skipping."
+            echo "Current value ($FINAL_NEW) matches old value ($FINAL_OLD). Skipping comment."
             exit 0
           fi
 
-          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD_NAME**: $FINAL_OLD → **$FINAL_NEW**"
+          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $FINAL_OLD → **$FINAL_NEW**"
           
           gh api graphql -f query='
             mutation($id: ID!, $body: String!) {
