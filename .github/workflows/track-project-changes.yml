@@ -7,76 +7,25 @@ jobs:
   comment_change:
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch and Process Change
-        id: process
+      - name: Post Comment as Bot
         env:
-          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
-          # These keys now match your webhook.js JSON.stringify exactly
-          ITEM_ID: ${{ github.event.client_payload.item_node_id }}
-          ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
-          FIELD_NAME: ${{ github.event.client_payload.field_name }}
-          USER_LOGIN: ${{ github.event.client_payload.changed_by }}
-          OLD_VAL: ${{ github.event.client_payload.old_value }}
-        run: |
-          set -e
-
-          echo "Fetching latest state for Item: $ITEM_ID"
-          echo "Waiting 5s for API sync..."
-          sleep 5
-
-          # 1. Query the CURRENT (New) state from GitHub
-          read -r -d '' QUERY << 'EOF' || true
-          query($item_id: ID!, $field_name: String!) {
-            node(id: $item_id) {
-              ... on ProjectV2Item {
-                fieldValueByName(name: $field_name) {
-                  ... on ProjectV2ItemFieldSingleSelectValue { name }
-                  ... on ProjectV2ItemFieldTextValue { text }
-                  ... on ProjectV2ItemFieldDateValue { date }
-                }
-              }
-            }
-          }
-          EOF
-
-          QUERY_DATA=$(gh api graphql -f query="$QUERY" -f item_id="$ITEM_ID" -f field_name="$FIELD_NAME")
-          
-          # 2. Extract and clean the NEW value
-          # Your webhook already cleaned the OLD value, but we must clean the NEW one here.
-          RAW_NEW_VAL=$(echo "$QUERY_DATA" | jq -r '.data.node.fieldValueByName | if type == "object" then (.name // .text // .date // "None") else (. // "None") end')
-          
-          # Strip timestamps and timezone offsets
-          CLEAN_NEW="${RAW_NEW_VAL%%T*}"
-          CLEAN_NEW="${CLEAN_NEW%%+*}"
-
-          # 3. Finalize variables for the next step
-          {
-            echo "FINAL_NEW=${CLEAN_NEW:-None}"
-            echo "FINAL_OLD=${OLD_VAL:-None}"
-          } >> "$GITHUB_ENV"
-
-      - name: Post Comment (as Bot)
-        env:
+          # Use GITHUB_TOKEN so the bot gets the credit
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
           FIELD: ${{ github.event.client_payload.field_name }}
+          OLD_VAL: ${{ github.event.client_payload.old_value }}
+          NEW_VAL: ${{ github.event.client_payload.new_value }}
           USER_LOGIN: ${{ github.event.client_payload.changed_by }}
         run: |
           set -e
-          
-          # Standardization
-          [ "$FINAL_NEW" == "null" ] || [ -z "$FINAL_NEW" ] && FINAL_NEW="None"
-          [ "$FINAL_OLD" == "null" ] || [ -z "$FINAL_OLD" ] && FINAL_OLD="None"
 
-          # 4. Short-circuit if no change is detected (Race Condition Guard)
-          if [ "$FINAL_NEW" == "$FINAL_OLD" ]; then
-            echo "Current value ($FINAL_NEW) matches old value ($FINAL_OLD). Skipping comment."
-            exit 0
-          fi
+          # Build the comment body
+          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $OLD_VAL → **$NEW_VAL**"
 
-          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $FINAL_OLD → **$FINAL_NEW**"
-          
+          # Execute the mutation
           gh api graphql -f query='
-            mutation($id: ID!, $body: String!) {
-              addComment(input: {subjectId: $id, body: $body}) { clientMutationId }
-            }' -f id="$ISSUE_ID" -f body="$COMMENT_BODY"
+            mutation($subjectId: ID!, $body: String!) {
+              addComment(input: {subjectId: $subjectId, body: $body}) {
+                clientMutationId
+              }
+            }' -f subjectId="$ISSUE_ID" -f body="$COMMENT_BODY"
