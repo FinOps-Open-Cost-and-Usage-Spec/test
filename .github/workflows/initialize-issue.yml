@@ -4,20 +4,20 @@ on:
     types: [opened]
 
 jobs:
-  setup_issue_in_project:
+  setup_issue:
     runs-on: ubuntu-latest
     steps:
-      - name: Add to Project, Set AI Status, and Inherit Task Force
+      - name: Inherit Task Force from Parent
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
           ORG: "FinOps-Open-Cost-and-Usage-Spec"
-          PRJ_NUM: 7
+          PRJ_NUM: 1
         run: |
           set -e
 
-          # 1. Fetch the Child's Parent ID and Project Metadata
-          echo "Identifying Parent Issue..."
-          INITIAL_DATA=$(gh api graphql -f query='
+          # 1. Fetch Field IDs and the Parent's Task Force value in one shot
+          echo "Fetching metadata and parent value..."
+          QUERY_DATA=$(gh api graphql -f query='
             query($issue_id: ID!, $org: String!, $num: Int!) {
               organization(login: $org) {
                 projectV2(number: $num) {
@@ -28,38 +28,15 @@ jobs:
               }
               node(id: $issue_id) {
                 ... on Issue {
-                  trackedInIssues(first: 1) { nodes { id } }
-                }
-              }
-            }' -f issue_id="${{ github.event.issue.node_id }}" -f org="$ORG" -F num=$PRJ_NUM)
-
-          PRJ_ID=$(echo "$INITIAL_DATA" | jq -r '.data.organization.projectV2.id')
-          PARENT_ISSUE_ID=$(echo "$INITIAL_DATA" | jq -r '.data.node.trackedInIssues.nodes[0].id // empty')
-          AI_FIELD_ID=$(echo "$INITIAL_DATA" | jq -r '.data.organization.projectV2.ai_field.id')
-          AI_OPEN_ID=$(echo "$INITIAL_DATA" | jq -r '.data.organization.projectV2.ai_field.options[] | select(.name=="Open") | .id')
-          TF_FIELD_ID=$(echo "$INITIAL_DATA" | jq -r '.data.organization.projectV2.tf_field.id')
-
-          # 2. Add Child to Project
-          echo "Adding child to project..."
-          ITEM_ID=$(gh api graphql -f query='
-            mutation($project: ID!, $issue: ID!) {
-              addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) { item { id } }
-            }' -f project="$PRJ_ID" -f issue="${{ github.event.issue.node_id }}" --jq '.data.addProjectV2ItemById.item.id')
-
-          # 3. Set AI Status to Open
-          gh api graphql -f query='
-            mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
-              updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } }
-            }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$AI_FIELD_ID" -f option="$AI_OPEN_ID"
-
-          # 4. If Parent exists, fetch its Task Force value directly
-          if [ -n "$PARENT_ISSUE_ID" ]; then
-            echo "Parent found ($PARENT_ISSUE_ID). Fetching Task Force value..."
-            
-            PARENT_DATA=$(gh api graphql -f query='
-              query($parent_id: ID!, $num: Int!) {
-                node(id: $parent_id) {
-                  ... on Issue {
+                  # Get this issue's project item ID (Auto-added by GitHub)
+                  projectItems(first: 10) {
+                    nodes {
+                      id
+                      project { number }
+                    }
+                  }
+                  # Get the Parent's Task Force value directly
+                  parent {
                     projectItems(first: 10) {
                       nodes {
                         project { number }
@@ -70,19 +47,47 @@ jobs:
                     }
                   }
                 }
-              }' -f parent_id="$PARENT_ISSUE_ID" -F num=$PRJ_NUM)
+              }
+            }' -f issue_id="${{ github.event.issue.node_id }}" -f org="$ORG" -F num=$PRJ_NUM)
 
-            PARENT_TF_OPTION_ID=$(echo "$PARENT_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.projectItems.nodes[] | select(.project.number == $NUM) | .fieldValueByName.optionId // empty')
+          # 2. Extract IDs
+          PRJ_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.id')
+          AI_FIELD_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.ai_field.id')
+          AI_OPEN_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.ai_field.options[] | select(.name=="Open") | .id')
+          TF_FIELD_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.tf_field.id')
 
-            if [ -n "$PARENT_TF_OPTION_ID" ] && [ "$PARENT_TF_OPTION_ID" != "null" ]; then
-              echo "Inheriting Task Force..."
-              gh api graphql -f query='
-                mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
-                  updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } }
-                }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$TF_FIELD_ID" -f option="$PARENT_TF_OPTION_ID"
-            else
-              echo "Parent has no Task Force value set."
-            fi
+          # Find THIS issue's project item ID
+          ITEM_ID=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.projectItems.nodes[] | select(.project.number == $NUM) | .id // empty')
+          
+          # Find the PARENT'S Task Force option ID
+          PARENT_TF_VALUE=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.parent.projectItems.nodes[]? | select(.project.number == $NUM) | .fieldValueByName.optionId // empty')
+
+          # 3. Guard: If GitHub auto-add is slightly slower than the workflow, wait 5s and try to get ITEM_ID once more
+          if [ -z "$ITEM_ID" ]; then
+            echo "Project Item not found yet. Sleeping 5s for auto-add sync..."
+            sleep 5
+            ITEM_ID=$(gh api graphql -f query='query($id: ID!, $num: Int!) { node(id: $id) { ... on Issue { projectItems(first: 10) { nodes { id project { number } } } } } }' -f id="${{ github.event.issue.node_id }}" -F num=$PRJ_NUM | jq -r --argjson NUM "$PRJ_NUM" '.data.node.projectItems.nodes[] | select(.project.number == $NUM) | .id // empty')
+          fi
+
+          if [ -z "$ITEM_ID" ]; then
+            echo "Error: Issue is not in Project $PRJ_NUM. Check auto-add settings."
+            exit 1
+          fi
+
+          # 4. Set AI Status to Open
+          echo "Setting AI Status..."
+          gh api graphql -f query='
+            mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+              updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { clientMutationId }
+            }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$AI_FIELD_ID" -f option="$AI_OPEN_ID"
+
+          # 5. Set Task Force (Inherit)
+          if [ -n "$PARENT_TF_VALUE" ] && [ "$PARENT_TF_VALUE" != "null" ]; then
+            echo "Inheriting Task Force..."
+            gh api graphql -f query='
+              mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+                updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { clientMutationId }
+              }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$TF_FIELD_ID" -f option="$PARENT_TF_VALUE"
           else
-            echo "No parent issue linked."
+            echo "No parent Task Force value found to inherit."
           fi
