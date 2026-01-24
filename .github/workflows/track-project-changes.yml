@@ -9,20 +9,29 @@ jobs:
     steps:
       - name: Post Comment as Bot
         env:
-          # Use GITHUB_TOKEN so the bot gets the credit
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
           FIELD: ${{ github.event.client_payload.field_name }}
           OLD_VAL: ${{ github.event.client_payload.old_value }}
           NEW_VAL: ${{ github.event.client_payload.new_value }}
           USER_LOGIN: ${{ github.event.client_payload.changed_by }}
+          ACTION_TYPE: ${{ github.event.client_payload.action_type }}
         run: |
           set -e
 
-          # Build the comment body
-          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $OLD_VAL → **$NEW_VAL**"
+          # Branch logic based on the action performed
+          if [ "$ACTION_TYPE" == "cleared" ]; then
+            COMMENT_BODY="🔄 **$USER_LOGIN** cleared the value of **$FIELD**"
+          else
+            # Prevent redundant comments (e.g. TF-1 -> TF-1)
+            if [ "$OLD_VAL" == "$NEW_VAL" ]; then
+              echo "No meaningful change. Skipping."
+              exit 0
+            fi
+            COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $OLD_VAL → **$NEW_VAL**"
+          fi
 
-          # Execute the mutation
+          # Post to the Issue
           gh api graphql -f query='
             mutation($subjectId: ID!, $body: String!) {
               addComment(input: {subjectId: $subjectId, body: $body}) {
