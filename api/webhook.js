@@ -4,8 +4,8 @@ export default async function handler(req, res) {
   const { action, projects_v2_item } = req.body;
 
   if (action === 'edited' && projects_v2_item) {
-    const owner = 'YOUR_GITHUB_USERNAME_OR_ORG';
-    const repo = 'YOUR_REPO_NAME';
+    const owner = 'FinOps-Open-Cost-and-Usage-Spec';
+    const repo = 'test';
 
     // 2. Fire the Repository Dispatch
     const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/dispatches`, {
