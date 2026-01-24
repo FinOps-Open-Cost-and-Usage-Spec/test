@@ -59,7 +59,7 @@ jobs:
 
           # 3. Create the comment body
           # Attributing the change to the user who performed it in the project
-          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: ~~$OLD_VAL_CLEAN~~ → **$NEW_VAL_CLEAN**"
+          COMMENT_BODY="🔄 **$USER_LOGIN** updated **$FIELD**: $OLD_VAL_CLEAN → **$NEW_VAL_CLEAN**"
 
           # 4. Post the comment via GraphQL mutation
           gh api graphql -f query='
