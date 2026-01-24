@@ -16,33 +16,27 @@ export default async function handler(req, res) {
   const contentNodeId = projects_v2_item?.content_node_id || projects_v2_item?.content?.node_id || null;
 
   if (action !== 'edited' || !contentNodeId) {
-    return res.status(200).send('Action ignored: Not an edit or missing content ID.');
+    return res.status(200).send('Action ignored: Not a relevant edit.');
   }
 
-  // 3. Extract Field Name and check exclusions
+  // 3. Extract Field Context
   const fieldName = changes?.field_value?.field_name || "Unknown Field";
   if (fieldName === "Status") {
     return res.status(200).send('Action ignored: Status field excluded.');
   }
 
-  // 4. Robust Value Parsing Helper
+  // 4. Detect "Cleared" state (Missing 'to' key)
+  const isCleared = changes?.field_value && !('to' in changes.field_value);
+
+  // 5. Value Parsing Helper
   const parseVal = (val) => {
     if (val === undefined || val === null) return "None";
-    // Handle objects (Single Select fields)
-    if (typeof val === 'object') {
-      return val.name || val.text || val.date || "None";
-    }
-    // Handle strings (Dates/Text) and strip timestamps
+    if (typeof val === 'object') return val.name || val.text || val.date || "None";
     return String(val).split('T')[0].split('+')[0];
   };
 
   const oldValue = parseVal(changes?.field_value?.from);
-  const newValue = parseVal(changes?.field_value?.to);
-
-  // 5. Short-circuit if no actual change detected (to prevent ghost comments)
-  if (oldValue === newValue) {
-    return res.status(200).send('Action ignored: No meaningful value change.');
-  }
+  const newValue = isCleared ? "blank" : parseVal(changes?.field_value?.to);
 
   // 6. Dispatch to GitHub Actions
   try {
@@ -57,16 +51,16 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         event_type: 'project_field_updated',
         client_payload: {
-          item_node_id: projects_v2_item.node_id,
           content_node_id: contentNodeId,
           field_name: fieldName,
           old_value: oldValue,
           new_value: newValue,
-          changed_by: sender?.login || "Unknown User"
+          changed_by: sender?.login || "Unknown User",
+          action_type: isCleared ? "cleared" : "updated"
         }
       })
     });
-    return res.status(200).send(`Dispatched: ${fieldName} update (${oldValue} -> ${newValue}).`);
+    return res.status(200).send(`Dispatched: ${fieldName} (${isCleared ? 'cleared' : 'updated'}).`);
   } catch (error) {
     console.error(error);
     return res.status(500).send('Internal Server Error.');
