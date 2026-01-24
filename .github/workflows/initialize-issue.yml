@@ -16,26 +16,15 @@ jobs:
         run: |
           set -e
 
-          # 1. Query metadata, AI Status, Task Force, AND the Type field
+          # 1. Query Issue Type and Project Metadata
           read -r -d '' QUERY << 'EOF' || true
           query($issue_id: ID!, $org: String!, $num: Int!) {
-            organization(login: $org) {
-              projectV2(number: $num) {
-                id
-                ai_field: field(name: "AI Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
-                tf_field: field(name: "Task Force") { ... on ProjectV2SingleSelectField { id } }
-                type_field: field(name: "Type") { ... on ProjectV2SingleSelectField { id } }
-              }
-            }
             node(id: $issue_id) {
               ... on Issue {
+                # Get the native Issue Type
+                issueType { name }
                 projectItems(first: 5) {
-                  nodes { 
-                    id 
-                    project { number } 
-                    # Fetch current Type value
-                    type_val: fieldValueByName(name: "Type") { ... on ProjectV2ItemFieldSingleSelectValue { name } }
-                  }
+                  nodes { id project { number } }
                 }
                 parent {
                   projectItems(first: 5) {
@@ -49,57 +38,54 @@ jobs:
                 }
               }
             }
+            organization(login: $org) {
+              projectV2(number: $num) {
+                id
+                ai_field: field(name: "AI Status") { ... on ProjectV2SingleSelectField { id options { id name } } }
+                tf_field: field(name: "Task Force") { ... on ProjectV2SingleSelectField { id } }
+              }
+            }
           }
           EOF
 
           # 2. Polling Loop
-          ITEM_ID=""
           for i in {1..3}; do
             echo "Fetching data (Attempt $i)..."
             QUERY_DATA=$(gh api graphql -f query="$QUERY" -f issue_id="$ISSUE_NODE_ID" -f org="$ORG" -F num=$PRJ_NUM)
             ITEM_ID=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.projectItems.nodes[] | select(.project.number == $NUM) | .id // empty')
-            
-            if [ -n "$ITEM_ID" ]; then
-              echo "Project Item found: $ITEM_ID"
-              break
-            fi
-            echo "Waiting for Auto-add to sync..."
+            if [ -n "$ITEM_ID" ]; then break; fi
             sleep 5
           done
 
-          if [ -z "$ITEM_ID" ]; then
-            echo "Error: Issue not found in Project $PRJ_NUM."
-            exit 1
-          fi
+          if [ -z "$ITEM_ID" ]; then echo "Item not found in Project"; exit 1; fi
 
-          # 3. Extract IDs and the specific "Type" of this issue
+          # 3. Extract IDs and the Native Issue Type
           PRJ_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.id')
           AI_FIELD_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.ai_field.id')
           AI_OPEN_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.ai_field.options[] | select(.name=="Open") | .id')
           TF_FIELD_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.tf_field.id')
-          PARENT_TF_VALUE=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.parent.projectItems.nodes[]? | select(.project.number == $NUM) | .fieldValueByName.optionId // empty')
           
-          # NEW: Get the "Type" name for the current item
-          CURRENT_TYPE=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.projectItems.nodes[] | select(.project.number == $NUM) | .type_val.name // empty')
+          # Native Issue Type Extraction
+          ISSUE_TYPE=$(echo "$QUERY_DATA" | jq -r '.data.node.issueType.name // empty')
+          
+          PARENT_TF_VALUE=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.parent.projectItems.nodes[]? | select(.project.number == $NUM) | .fieldValueByName.optionId // empty')
 
-          # 4. Update AI Status (ONLY if Type is Action Item)
-          if [ "$CURRENT_TYPE" == "Action Item" ]; then
-            echo "Type is Action Item. Setting AI Status to Open..."
+          # 4. Update AI Status (ONLY if Issue Type is Action Item)
+          if [ "$ISSUE_TYPE" == "Action Item" ]; then
+            echo "Issue Type is 'Action Item'. Setting AI Status to Open..."
             gh api graphql -f query='
               mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
                 updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { clientMutationId }
               }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$AI_FIELD_ID" -f option="$AI_OPEN_ID"
           else
-            echo "Type is '$CURRENT_TYPE', not 'Action Item'. Skipping AI Status update."
+            echo "Issue Type is '$ISSUE_TYPE'. Skipping AI Status update."
           fi
 
-          # 5. Update Task Force (Always happens if parent value exists)
+          # 5. Inherit Task Force
           if [ -n "$PARENT_TF_VALUE" ] && [ "$PARENT_TF_VALUE" != "null" ]; then
             echo "Inheriting Task Force..."
             gh api graphql -f query='
               mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
                 updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { clientMutationId }
               }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$TF_FIELD_ID" -f option="$PARENT_TF_VALUE"
-          else
-            echo "No parent Task Force value found to inherit."
           fi
