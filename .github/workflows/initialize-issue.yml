@@ -1,15 +1,13 @@
 name: Initialize Project Fields
 on:
   issues:
-    types: [opened, edited]
+    types: [opened]
 
 jobs:
   setup_issue_in_project:
     runs-on: ubuntu-latest
-    # Added a simple check to avoid running on every tiny edit
-    # This only runs if it's a brand new issue OR if the parent relationship just appeared
     steps:
-      - name: Add to Project and Sync Inheritance
+      - name: Add to Project and Wait for Parent Link
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
           ORG: "FinOps-Open-Cost-and-Usage-Spec"
@@ -17,42 +15,56 @@ jobs:
         run: |
           set -e
 
-          echo "Fetching Project and Relationship data..."
-          QUERY_DATA=$(gh api graphql -f query='
-            query($issue_id: ID!, $org: String!, $num: Int!) {
+          # 1. ADD TO PROJECT FIRST
+          # We do this immediately so the item exists in the project
+          echo "Fetching Project ID..."
+          PRJ_DATA=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
               organization(login: $org) {
-                projectV2(number: $num) {
-                  id
-                  ai_status_field: field(name: "AI Status") {
-                    ... on ProjectV2SingleSelectField { id options { id name } }
-                  }
-                  task_force_field: field(name: "Task Force") {
-                    ... on ProjectV2SingleSelectField { id }
-                  }
-                }
+                projectV2(number: $num) { id }
               }
-              node(id: $issue_id) {
-                ... on Issue {
-                  # Check current AI Status to avoid double-processing
-                  projectItems(first: 10) {
-                    nodes {
-                      project { number }
-                      fieldValueByName(name: "AI Status") {
-                        ... on ProjectV2ItemFieldSingleSelectValue { name }
-                      }
+            }' -f org="$ORG" -F num=$PRJ_NUM)
+          
+          PRJ_ID=$(echo "$PRJ_DATA" | jq -r '.data.organization.projectV2.id')
+
+          echo "Adding issue to project..."
+          ITEM_ID=$(gh api graphql -f query='
+            mutation($project: ID!, $issue: ID!) {
+              addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
+                item { id }
+              }
+            }' -f project="$PRJ_ID" -f issue="${{ github.event.issue.node_id }}" --jq '.data.addProjectV2ItemById.item.id')
+
+          # 2. POLL FOR PARENT RELATIONSHIP
+          # We loop 6 times (30 seconds total) to give GitHub time to link the sub-issue
+          echo "Waiting for parent relationship to sync..."
+          PARENT_TF_VALUE=""
+          for i in {1..6}; do
+            QUERY_DATA=$(gh api graphql -f query='
+              query($issue_id: ID!, $org: String!, $num: Int!) {
+                organization(login: $org) {
+                  projectV2(number: $num) {
+                    ai_status_field: field(name: "AI Status") {
+                      ... on ProjectV2SingleSelectField { id options { id name } }
+                    }
+                    task_force_field: field(name: "Task Force") {
+                      ... on ProjectV2SingleSelectField { id }
                     }
                   }
-                  # Check for Parent
-                  trackedInIssues(first: 1) {
-                    nodes {
-                      projectItems(first: 10) {
-                        nodes {
-                          project { number }
-                          fieldValues(first: 20) {
-                            nodes {
-                              ... on ProjectV2ItemFieldSingleSelectValue {
-                                optionId
-                                field { ... on ProjectV2FieldCommon { name } }
+                }
+                node(id: $issue_id) {
+                  ... on Issue {
+                    trackedInIssues(first: 1) {
+                      nodes {
+                        projectItems(first: 10) {
+                          nodes {
+                            project { number }
+                            fieldValues(first: 20) {
+                              nodes {
+                                ... on ProjectV2ItemFieldSingleSelectValue {
+                                  optionId
+                                  field { ... on ProjectV2FieldCommon { name } }
+                                }
                               }
                             }
                           }
@@ -61,38 +73,33 @@ jobs:
                     }
                   }
                 }
-              }
-            }' -f issue_id="${{ github.event.issue.node_id }}" -f org="$ORG" -F num=$PRJ_NUM)
+              }' -f issue_id="${{ github.event.issue.node_id }}" -f org="$ORG" -F num=$PRJ_NUM)
 
-          # Extract IDs
-          PRJ_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.id // empty')
+            PARENT_TF_VALUE=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '
+              .data.node.trackedInIssues.nodes[0].projectItems.nodes[]? 
+              | select(.project.number == $NUM) 
+              | .fieldValues.nodes[]? 
+              | select(.field.name == "Task Force") 
+              | .optionId // empty
+            ')
+
+            if [ -n "$PARENT_TF_VALUE" ] && [ "$PARENT_TF_VALUE" != "null" ]; then
+              echo "Parent Task Force found!"
+              break
+            else
+              echo "Attempt $i: Parent relationship not found yet. Sleeping 5s..."
+              sleep 5
+            fi
+          done
+
+          # 3. EXTRACT REMAINING IDs
           AI_FIELD_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.ai_status_field.id // empty')
           AI_OPEN_OPTION_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.ai_status_field.options[]? | select(.name=="Open") | .id // empty')
           TF_FIELD_ID=$(echo "$QUERY_DATA" | jq -r '.data.organization.projectV2.task_force_field.id // empty')
-          
-          # Check if AI Status is already set
-          CURRENT_AI_STATUS=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '.data.node.projectItems.nodes[]? | select(.project.number == $NUM) | .fieldValueByName.name // empty')
-          
-          # Extract Parent Task Force
-          PARENT_TF_VALUE=$(echo "$QUERY_DATA" | jq -r --argjson NUM "$PRJ_NUM" '
-            .data.node.trackedInIssues.nodes[0].projectItems.nodes[]? 
-            | select(.project.number == $NUM) 
-            | .fieldValues.nodes[]? 
-            | select(.field.name == "Task Force") 
-            | .optionId // empty
-          ')
 
-          # 1. Add to Project (Safe to run multiple times, returns same ID)
-          ITEM_ID=$(gh api graphql -f query='
-            mutation($project: ID!, $issue: ID!) {
-              addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
-                item { id }
-              }
-            }' -f project="$PRJ_ID" -f issue="${{ github.event.issue.node_id }}" --jq '.data.addProjectV2ItemById.item.id')
-
-          # 2. Set AI Status (Only if not already set)
-          if [ -z "$CURRENT_AI_STATUS" ] && [ -n "$AI_OPEN_OPTION_ID" ]; then
-            echo "Initializing AI Status to Open..."
+          # 4. SET AI STATUS
+          if [ -n "$AI_OPEN_OPTION_ID" ]; then
+            echo "Setting AI Status to Open..."
             gh api graphql -f query='
               mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
                 updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) {
@@ -101,9 +108,9 @@ jobs:
               }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$AI_FIELD_ID" -f option="$AI_OPEN_OPTION_ID"
           fi
 
-          # 3. Set Task Force (If parent found)
+          # 5. SET TASK FORCE (INHERIT)
           if [ -n "$PARENT_TF_VALUE" ] && [ "$PARENT_TF_VALUE" != "null" ]; then
-            echo "Inheriting Task Force from parent..."
+            echo "Inheriting Task Force (ID: $PARENT_TF_VALUE)..."
             gh api graphql -f query='
               mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
                 updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) {
@@ -111,5 +118,5 @@ jobs:
                 }
               }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$TF_FIELD_ID" -f option="$PARENT_TF_VALUE"
           else
-            echo "No parent detected yet. This is expected during the first 'opened' event."
+            echo "No parent found after 30 seconds. Skipping inheritance."
           fi
