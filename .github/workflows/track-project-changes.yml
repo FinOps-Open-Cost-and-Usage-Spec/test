@@ -1,8 +1,7 @@
 name: Log Column Change to Issue
 on:
-  issues:
-    types: 
-       - edited
+  repository_dispatch:
+    types: [project-item-updated]
 
 jobs:
   comment_on_change:
