@@ -1,37 +1,50 @@
-name: Log Column Change to Issue
+name: Log Project Field Change
 on:
   repository_dispatch:
     types: [project_field_updated]
 
 jobs:
-  comment_on_change:
+  comment_change:
     runs-on: ubuntu-latest
     steps:
-      - name: Post comment on linked issue
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }} # PROJECT_TRACKING_TODEN
-          script: |
-            const { item, changes } = context.payload;
-            
-            // 1. Check if the edited item is an Issue (not a Draft or PR)
-            if (item.content_type !== 'Issue') return;
+      - name: Fetch New Value
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TRACKING_TOKEN }}
+        run: |
+          # Fetch the current (new) value of the field that changed
+          gh api graphql -f query='
+            query($item_id: ID!) {
+              node(id: $item_id) {
+                ... on ProjectV2Item {
+                  fieldValues(first: 20) {
+                    nodes {
+                      ... on ProjectV2ItemFieldSingleSelectValue {
+                        name
+                        field { ... on ProjectV2FieldCommon { name } }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -f item_id="${{ github.event.client_payload.item_node_id }}" > data.json
 
-            // 2. Identify what changed (e.g., a field named "Priority" or "Status")
-            // Note: GitHub's payload structure for project_item can be nested
-            const fieldName = changes.field_value?.field_name;
-            const newValue = changes.field_value?.field_value;
-
-            if (fieldName) {
-              const issueNumber = item.content_node_id; // Use GraphQL ID or parse from URL
-              const commentBody = `🤖 **Project Update:** Field *${fieldName}* was changed to **${newValue}**.`;
-
-              // 3. Post the comment
-              // Note: You'll need the repo owner and name from the item content
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: item.number,
-                body: commentBody
-              });
-            }
+      - name: Post Comment
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TRACKING_TOKEN }}
+          OLD_VAL: ${{ github.event.client_payload.old_value }}
+          FIELD: ${{ github.event.client_payload.field_name }}
+          ISSUE_ID: ${{ github.event.client_payload.content_node_id }}
+        run: |
+          # Extract the NEW value from the JSON we just fetched
+          NEW_VAL=$(jq -r --arg FIELD "$FIELD" '.data.node.fieldValues.nodes[] | select(.field.name==$FIELD) | .name' data.json)
+          
+          # Create the comment body
+          COMMENT_BODY="🔄 **Project Update:** Field '$FIELD' changed from **$OLD_VAL** to **$NEW_VAL**."
+          
+          # Post the comment to the Issue or PR
+          gh api graphql -f query='
+            mutation($subjectId: ID!, $body: String!) {
+              addComment(input: {subjectId: $subjectId, body: $body}) {
+                clientMutationId
+              }
+            }' -f subjectId="$ISSUE_ID" -f body="$COMMENT_BODY"
