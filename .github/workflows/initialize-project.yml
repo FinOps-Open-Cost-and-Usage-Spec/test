@@ -1,0 +1,62 @@
+name: Initialize AI Status
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  set_initial_status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add to Project and Set AI Status
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          # REPLACE THESE TWO VALUES:
+          ORG: "FinOps-Open-Cost-and-Usage-Spec"
+          PRJ_NUM: 7 
+        run: |
+          # 1. Fetch IDs for Project, Field, and the "Open" Option
+          # We query the Org and Project to find the internal Node IDs
+          PROJECT_DATA=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 50) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        name
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+              }
+            }' -f org="$ORG" -F num=$PRJ_NUM)
+
+          # 2. Extract specific IDs using jq
+          PRJ_ID=$(echo $PROJECT_DATA | jq -r '.data.organization.projectV2.id')
+          FIELD_ID=$(echo $PROJECT_DATA | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name=="AI Status") | .id')
+          OPTION_ID=$(echo $PROJECT_DATA | jq -r --arg OPT "Open" '.data.organization.projectV2.fields.nodes[] | select(.name=="AI Status") | .options[] | select(.name==$OPT) | .id')
+
+          # 3. Add the newly opened Issue to the Project
+          # This returns the Item ID (the "Card" ID)
+          ITEM_ID=$(gh api graphql -f query='
+            mutation($project: ID!, $issue: ID!) {
+              addProjectV2ItemById(input: {projectId: $project, contentId: $issue}) {
+                item { id }
+              }
+            }' -f project="$PRJ_ID" -f issue="${{ github.event.issue.node_id }}" --jq '.data.addProjectV2ItemById.item.id')
+
+          # 4. Update the "AI Status" field on that specific Item
+          gh api graphql -f query='
+            mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $project,
+                itemId: $item,
+                fieldId: $field,
+                value: { singleSelectOptionId: $option }
+              }) {
+                projectV2Item { id }
+              }
+            }' -f project="$PRJ_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f option="$OPTION_ID"
