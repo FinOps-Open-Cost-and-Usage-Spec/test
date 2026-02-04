@@ -10,15 +10,14 @@ on:
 
 jobs:
   sync_approvals:
-    # IMPORTANT: Only run for actual PRs (issue_comment triggers for both Issues and PRs)
-    if: github.event.issue.pull_request || github.event.pull_request
     runs-on: ubuntu-latest
     env:
+      # Using your specific PAT secret
       GH_TOKEN: ${{ secrets.PROJECT_PAT }}
-      ORG: "your-org-name" # Ensure this is your actual Org name or Username
-      PROJECT_NUM: 1
-      # This logic handles both PR events and Comment events to get the URL
-      PR_URL: ${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}
+      # Update these to match your environment
+      ORG: "FinOps-Open-Cost-and-Usage-Spec"
+      PROJECT_NUM: 7
+      PR_URL: ${{ github.event.pull_request.html_url }}
 
     steps:
       - name: Calculate and Update Approvals
@@ -26,31 +25,27 @@ jobs:
           set -e
 
           # 1. Get the count of unique "APPROVED" reviews
+          # This filters for the latest review status from each reviewer
           APPROVAL_COUNT=$(gh pr view "$PR_URL" --json reviews | \
             jq '.reviews | group_by(.author.login) | map(select(.[-1].state == "APPROVED")) | length')
           
           echo "Current Unique Approvals: $APPROVAL_COUNT"
 
-          # 2. Get Project Data
-          # We add --owner-type to resolve the "unknown owner type" error
-          # If ORG is a person, use "user". If it is a GitHub Org, use "organization".
-          OWNER_TYPE="organization" 
-
-          # 3. Get the Project ID and Item ID
-          # We combine these to reduce CLI calls and pinpoint the error
-          PROJECT_DATA=$(gh project view $PROJECT_NUM --owner "$ORG" --owner-type "$OWNER_TYPE" --format json)
-          PROJECT_ID=$(echo "$PROJECT_DATA" | jq -r '.id')
-          
-          ITEM_ID=$(gh project item-list $PROJECT_NUM --owner "$ORG" --owner-type "$OWNER_TYPE" --format json | \
-                    jq -r ".items[] | select(.content.url == \"$PR_URL\") | .id")
+          # 2. Get the Project Item ID
+          # We search the project for an item matching this PR's URL
+          ITEM_DATA=$(gh project item-list $PROJECT_NUM --owner "$ORG" --format json)
+          ITEM_ID=$(echo "$ITEM_DATA" | jq -r ".items[] | select(.content.url == \"$PR_URL\") | .id")
 
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
-            echo "PR not found in Project. Attempting to add it..."
-            ITEM_ID=$(gh project item-add $PROJECT_NUM --owner "$ORG" --owner-type "$OWNER_TYPE" --url "$PR_URL" --format json | jq -r '.id')
+            echo "Error: PR not found in Project $PROJECT_NUM. Is the PR added to the board?"
+            exit 0
           fi
 
-          # 4. Update the 'Approvals' field
-          # Note: If you couldn't set it to 'Number', change --number to --text below
+          # 3. Get the Project ID (required for the edit command)
+          PROJECT_ID=$(gh project view $PROJECT_NUM --owner "$ORG" --format json | jq -r '.id')
+
+          # 4. Update the 'Approvals' number field
+          # Ensure your Project V2 has a 'Number' type field exactly named "Approvals"
           gh project item-edit \
             --id "$ITEM_ID" \
             --project-id "$PROJECT_ID" \
