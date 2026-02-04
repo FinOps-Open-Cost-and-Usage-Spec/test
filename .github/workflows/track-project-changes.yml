@@ -20,7 +20,7 @@ jobs:
         run: |
           set -e
 
-          # 1. Fetch Metadata safely
+          # 1. Fetch Metadata (Handles both Issue and PR types)
           QUERY_INFO=$(gh api graphql -f query='
             query($id: ID!) {
               node(id: $id) {
@@ -33,6 +33,7 @@ jobs:
           
           # 2. Safety check for date
           if [ -z "$CREATED_AT" ] || [ "$CREATED_AT" == "null" ]; then
+            echo "Warning: Could not resolve createdAt for $ISSUE_ID. Defaulting age to old."
             AGE_SECONDS=3600
           else
             CREATE_TS=$(date -d "$CREATED_AT" +%s)
@@ -65,7 +66,7 @@ jobs:
             fi
           fi
 
-          # 5. Query for existing bot comments
+          # 5. Query for existing bot comments (Universal check)
           QUERY_LATEST='query($id: ID!) { 
             node(id: $id) { 
               ... on Issue { comments(last: 20) { nodes { id body createdAt viewerDidAuthor } } }
@@ -77,21 +78,26 @@ jobs:
           RECENT_COMMENT=$(echo "$ALL_COMMENTS" | jq -c 'reverse | .[] | select(.viewerDidAuthor == true) | select((now - (.createdAt | fromdateiso8601)) < 300)' | head -n 1 || echo "")
 
           # 6. Append or Create Comment
-          if [ -n "$RECENT_COMMENT" ]; then
+          if [ -n "$RECENT_COMMENT" ] && [ "$RECENT_COMMENT" != "" ]; then
             COMMENT_ID=$(echo "$RECENT_COMMENT" | jq -r '.id')
             EXISTING_BODY=$(echo "$RECENT_COMMENT" | jq -r '.body')
-            # Using a heredoc with a unique delimiter to avoid quote nesting issues
-            UPDATED_BODY=$(cat <<EOF
-          $EXISTING_BODY
-          $NEW_LINE
-          EOF
-          )
-            gh api graphql -f query='mutation($id: ID!, $body: String!) { updateIssueComment(input: { id: $id, body: $body }) { clientMutationId } }' -f id="$COMMENT_ID" -f body="$UPDATED_BODY"
+            
+            # Using shell-safe line break
+            UPDATED_BODY="${EXISTING_BODY}"$'\n'"${NEW_LINE}"
+            
+            echo "Updating existing comment $COMMENT_ID..."
+            gh api graphql -f query='
+              mutation($id: ID!, $body: String!) { 
+                updateIssueComment(input: { id: $id, body: $body }) { clientMutationId } 
+              }' -f id="$COMMENT_ID" -f body="$UPDATED_BODY"
           else
-            NEW_BODY=$(cat <<EOF
-          🔄 **Project Update**
-          $NEW_LINE
-          EOF
-          )
-            gh api graphql -f query='mutation($id: ID!, $body: String!) { addComment(input: { subjectId: $id, body: $body }) { clientMutationId } }' -f id="$ISSUE_ID" -f body="$NEW_BODY"
+            echo "Creating new comment for ID: $ISSUE_ID..."
+            NEW_BODY="🔄 **Project Update**"$'\n'"${NEW_LINE}"
+            
+            gh api graphql -f query='
+              mutation($subject: ID!, $body: String!) { 
+                addComment(input: { subjectId: $subject, body: $body }) { 
+                  commentEdge { node { id } } 
+                } 
+              }' -f subject="$ISSUE_ID" -f body="$NEW_BODY"
           fi
