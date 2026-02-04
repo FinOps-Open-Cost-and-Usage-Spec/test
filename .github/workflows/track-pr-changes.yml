@@ -1,0 +1,67 @@
+name: Sync Approval Count to Project
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  issue_comment:
+    types: [created]
+
+jobs:
+  sync_approvals:
+    # Ensure we only run on PRs (issue_comment triggers for issues too)
+    if: github.event.issue.pull_request || github.event.pull_request
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+      ORG: "FinOps-Open-Cost-and-Usage-Spec"
+      PROJECT_NUM: 7
+
+    steps:
+      # Fixes the "not a git repository" error
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Calculate and Update Approvals
+        run: |
+          set -e
+
+          # 1. Determine the PR URL dynamically based on the trigger
+          if [ "${{ github.event_name }}" == "issue_comment" ]; then
+            PR_URL="${{ github.event.issue.pull_request.html_url }}"
+          else
+            PR_URL="${{ github.event.pull_request.html_url }}"
+          fi
+          
+          echo "Processing PR: $PR_URL"
+
+          # 2. Get the count of unique "APPROVED" reviews
+          APPROVAL_COUNT=$(gh pr view "$PR_URL" --json reviews | \
+            jq '.reviews | group_by(.author.login) | map(select(.[-1].state == "APPROVED")) | length')
+          
+          echo "Current Unique Approvals: $APPROVAL_COUNT"
+
+          # 3. Get Project ID
+          PROJECT_ID=$(gh project view $PROJECT_NUM --owner "$ORG" --format json --jq '.id')
+          echo "Project ID: $PROJECT_ID"
+
+          # 4. Find the Item ID in the project
+          ITEM_ID=$(gh project item-list $PROJECT_NUM --owner "$ORG" --format json | \
+                    jq -r ".items[] | select(.content.url == \"$PR_URL\") | .id")
+
+          # 5. Fallback: Add PR to project if missing
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
+            echo "PR not in project. Adding..."
+            ITEM_ID=$(gh project item-add $PROJECT_NUM --owner "$ORG" --url "$PR_URL" --format json --jq '.id')
+          fi
+
+          # 6. Update the 'Approvals' field
+          # Note: If this fails with 'not a number', change --number to --text
+          gh project item-edit \
+            --id "$ITEM_ID" \
+            --project-id "$PROJECT_ID" \
+            --field "Approvals" \
+            --number "$APPROVAL_COUNT"
+          
+          echo "Successfully updated Approvals to $APPROVAL_COUNT"
