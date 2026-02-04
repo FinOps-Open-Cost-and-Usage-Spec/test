@@ -5,6 +5,8 @@ on:
     types: [opened, edited, synchronize, reopened]
   pull_request_review:
     types: [submitted, edited, dismissed]
+  issue_comment:
+    types: [created]
 
 jobs:
   sync_approvals:
