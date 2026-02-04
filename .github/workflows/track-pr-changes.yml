@@ -36,12 +36,12 @@ jobs:
           echo "Processing PR: $PR_URL (Node ID: $PR_NODE_ID)"
 
           # 2. Get Unique Approval Count
+          # We ensure this results in a clean integer string
           APPROVAL_COUNT=$(gh pr view "$PR_URL" --json reviews | \
             jq '.reviews | group_by(.author.login) | map(select(.[-1].state == "APPROVED")) | length')
           echo "Current Unique Approvals: $APPROVAL_COUNT"
 
           # 3. Get Project ID and Field ID
-          # Removed the unused $project variable that caused the "anonymous query" error
           PROJECT_DATA=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -57,8 +57,6 @@ jobs:
             }' -f org="$ORG" -F num=$PROJECT_NUM)
 
           PROJECT_ID=$(echo "$PROJECT_DATA" | jq -r '.data.organization.projectV2.id')
-          
-          # This specifically looks for the "Approvals" field ID
           FIELD_ID=$(echo "$PROJECT_DATA" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Approvals") | .id')
 
           if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" == "null" ]; then
@@ -67,7 +65,7 @@ jobs:
           fi
           
           if [ -z "$FIELD_ID" ] || [ "$FIELD_ID" == "null" ]; then
-             echo "Error: Could not find a field named 'Approvals'. Please check the field name in your project."
+             echo "Error: Could not find a field named 'Approvals'."
              exit 1
           fi
 
@@ -99,15 +97,20 @@ jobs:
           fi
 
           # 6. Update the Field
-          # Using Float! because GraphQL expects numbers to be passed as Floats/Ints
+          # CRITICAL: We pass the variable without quotes in the -F flag to 
+          # ensure the CLI recognizes it as a number literal.
           gh api graphql -f query='
-            mutation($project: ID!, $item: ID!, $field: ID!, $value: Float!) {
+            mutation($project: ID!, $item: ID!, $field: ID!, $val: Float!) {
               updateProjectV2ItemFieldValue(input: {
                 projectId: $project,
                 itemId: $item,
                 fieldId: $field,
-                value: { number: $value }
+                value: { number: $val }
               }) { clientMutationId }
-            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f value="$APPROVAL_COUNT"
+            }' \
+            -f project="$PROJECT_ID" \
+            -f item="$ITEM_ID" \
+            -f field="$FIELD_ID" \
+            -F val=$APPROVAL_COUNT
 
           echo "Successfully updated Approvals to $APPROVAL_COUNT"
