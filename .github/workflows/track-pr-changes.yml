@@ -2,7 +2,8 @@ name: Sync Approval Count to Project
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    # Added 'review_requested' to trigger when you ask someone to look at the PR
+    types: [opened, edited, synchronize, reopened, review_requested]
   pull_request_review:
     types: [submitted, edited, dismissed]
   issue_comment:
@@ -36,7 +37,7 @@ jobs:
           echo "Processing PR: $PR_URL (Node ID: $PR_NODE_ID)"
 
           # 2. Get Unique Approval Count
-          # We ensure this results in a clean integer string
+          # This logic is crucial: it counts current valid approvals only.
           APPROVAL_COUNT=$(gh pr view "$PR_URL" --json reviews | \
             jq '.reviews | group_by(.author.login) | map(select(.[-1].state == "APPROVED")) | length')
           echo "Current Unique Approvals: $APPROVAL_COUNT"
@@ -48,9 +49,7 @@ jobs:
                 projectV2(number: $num) {
                   id
                   fields(first: 50) {
-                    nodes {
-                      ... on ProjectV2Field { id name }
-                    }
+                    nodes { ... on ProjectV2Field { id name } }
                   }
                 }
               }
@@ -63,22 +62,14 @@ jobs:
              echo "Error: Could not find Project #$PROJECT_NUM"
              exit 1
           fi
-          
-          if [ -z "$FIELD_ID" ] || [ "$FIELD_ID" == "null" ]; then
-             echo "Error: Could not find a field named 'Approvals'."
-             exit 1
-          fi
 
-          # 4. Get the Item ID for this PR
+          # 4. Get the Item ID for this PR in the Project
           ITEM_ID=$(gh api graphql -f query='
             query($pr_id: ID!) {
               node(id: $pr_id) {
                 ... on PullRequest {
                   projectItems(first: 20) {
-                    nodes {
-                      id
-                      project { id }
-                    }
+                    nodes { id project { id } }
                   }
                 }
               }
@@ -90,27 +81,16 @@ jobs:
             echo "PR not in project. Adding..."
             ITEM_ID=$(gh api graphql -f query='
               mutation($project: ID!, $content: ID!) {
-                addProjectV2ItemById(input: {projectId: $project, contentId: $content}) {
-                  item { id }
-                }
+                addProjectV2ItemById(input: {projectId: $project, contentId: $content}) { item { id } }
               }' -f project="$PROJECT_ID" -f content="$PR_NODE_ID" | jq -r '.data.addProjectV2ItemById.item.id')
           fi
 
           # 6. Update the Field
-          # CRITICAL: We pass the variable without quotes in the -F flag to 
-          # ensure the CLI recognizes it as a number literal.
           gh api graphql -f query='
             mutation($project: ID!, $item: ID!, $field: ID!, $val: Float!) {
               updateProjectV2ItemFieldValue(input: {
-                projectId: $project,
-                itemId: $item,
-                fieldId: $field,
-                value: { number: $val }
+                projectId: $project, itemId: $item, fieldId: $field, value: { number: $val }
               }) { clientMutationId }
-            }' \
-            -f project="$PROJECT_ID" \
-            -f item="$ITEM_ID" \
-            -f field="$FIELD_ID" \
-            -F val=$APPROVAL_COUNT
+            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -F val=$APPROVAL_COUNT
 
           echo "Successfully updated Approvals to $APPROVAL_COUNT"
