@@ -20,7 +20,7 @@ jobs:
         run: |
           set -e
 
-          # 1. Fetch Metadata safely (Checks both Issue and PR types)
+          # 1. Fetch Metadata safely
           QUERY_INFO=$(gh api graphql -f query='
             query($id: ID!) {
               node(id: $id) {
@@ -29,20 +29,18 @@ jobs:
               }
             }' -f id="$ISSUE_ID")
 
-          # Extract date; use empty string if not found to prevent "null" string
           CREATED_AT=$(echo "$QUERY_INFO" | jq -r '.data.node.createdAt // ""')
           
-          # 2. Safety check for date to prevent the 'invalid date null' error
+          # 2. Safety check for date
           if [ -z "$CREATED_AT" ] || [ "$CREATED_AT" == "null" ]; then
-            echo "Warning: Could not resolve createdAt for $ISSUE_ID. Defaulting to 0."
-            AGE_SECONDS=3600 # Fallback: treat as an old issue
+            AGE_SECONDS=3600
           else
             CREATE_TS=$(date -d "$CREATED_AT" +%s)
             NOW_TS=$(date +%s)
             AGE_SECONDS=$(( NOW_TS - CREATE_TS ))
           fi
 
-          # 3. Determine if this is an Initialization or a Manual Update
+          # 3. Determine Prefix
           if [ "$AGE_SECONDS" -lt 60 ]; then
             PREFIX="**Initialized**"
           else
@@ -50,18 +48,16 @@ jobs:
             PREFIX="**$ACTOR** updated"
           fi
 
-          # 4. Define the new log line
+          # 4. Format the log line
           if [ "$ACTION_TYPE" == "cleared" ]; then
              [ "$AGE_SECONDS" -lt 60 ] && PREFIX="**Cleared**"
              NEW_LINE="* $PREFIX **$FIELD**"
           else
-            # Skip if no actual value change detected
             if [ "$OLD_VAL" == "$NEW_VAL" ] && [ -n "$OLD_VAL" ]; then
               echo "No change detected. Skipping."
               exit 0
             fi
             
-            # Format: Old -> New (Handling empty old values)
             if [ -z "$OLD_VAL" ] || [ "$OLD_VAL" == "null" ]; then
               NEW_LINE="* $PREFIX **$FIELD**: **$NEW_VAL**"
             else
@@ -69,7 +65,7 @@ jobs:
             fi
           fi
 
-          # 5. Query for existing bot comments (checks PullRequest and Issue)
+          # 5. Query for existing bot comments
           QUERY_LATEST='query($id: ID!) { 
             node(id: $id) { 
               ... on Issue { comments(last: 20) { nodes { id body createdAt viewerDidAuthor } } }
@@ -78,6 +74,24 @@ jobs:
           }'
           
           ALL_COMMENTS=$(gh api graphql -f query="$QUERY_LATEST" -f id="$ISSUE_ID" --jq '.data.node.comments.nodes // []')
-          
-          # 6. Identify a 'recent' bot comment (within 5 minutes) to append to
-          RECENT_COMMENT=$(echo "$ALL_
+          RECENT_COMMENT=$(echo "$ALL_COMMENTS" | jq -c 'reverse | .[] | select(.viewerDidAuthor == true) | select((now - (.createdAt | fromdateiso8601)) < 300)' | head -n 1 || echo "")
+
+          # 6. Append or Create Comment
+          if [ -n "$RECENT_COMMENT" ]; then
+            COMMENT_ID=$(echo "$RECENT_COMMENT" | jq -r '.id')
+            EXISTING_BODY=$(echo "$RECENT_COMMENT" | jq -r '.body')
+            # Using a heredoc with a unique delimiter to avoid quote nesting issues
+            UPDATED_BODY=$(cat <<EOF
+          $EXISTING_BODY
+          $NEW_LINE
+          EOF
+          )
+            gh api graphql -f query='mutation($id: ID!, $body: String!) { updateIssueComment(input: { id: $id, body: $body }) { clientMutationId } }' -f id="$COMMENT_ID" -f body="$UPDATED_BODY"
+          else
+            NEW_BODY=$(cat <<EOF
+          🔄 **Project Update**
+          $NEW_LINE
+          EOF
+          )
+            gh api graphql -f query='mutation($id: ID!, $body: String!) { addComment(input: { subjectId: $id, body: $body }) { clientMutationId } }' -f id="$ISSUE_ID" -f body="$NEW_BODY"
+          fi
