@@ -10,7 +10,6 @@ on:
 
 jobs:
   sync_approvals:
-    # Ensure we only run on PRs (issue_comment triggers for issues too)
     if: github.event.issue.pull_request || github.event.pull_request
     runs-on: ubuntu-latest
     env:
@@ -19,49 +18,89 @@ jobs:
       PROJECT_NUM: 7
 
     steps:
-      # Fixes the "not a git repository" error
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Calculate and Update Approvals
+      - name: Sync Approvals
         run: |
           set -e
 
-          # 1. Determine the PR URL dynamically based on the trigger
+          # 1. Determine PR URL and Node ID
           if [ "${{ github.event_name }}" == "issue_comment" ]; then
             PR_URL="${{ github.event.issue.pull_request.html_url }}"
           else
             PR_URL="${{ github.event.pull_request.html_url }}"
           fi
           
-          echo "Processing PR: $PR_URL"
+          # We need the GraphQL Node ID for the PR
+          PR_NODE_ID=$(gh pr view "$PR_URL" --json id --jq '.id')
+          echo "Processing PR: $PR_URL (Node ID: $PR_NODE_ID)"
 
-          # 2. Get the count of unique "APPROVED" reviews
+          # 2. Get Unique Approval Count
           APPROVAL_COUNT=$(gh pr view "$PR_URL" --json reviews | \
             jq '.reviews | group_by(.author.login) | map(select(.[-1].state == "APPROVED")) | length')
-          
           echo "Current Unique Approvals: $APPROVAL_COUNT"
 
-          # 3. Get Project ID
-          PROJECT_ID=$(gh project view $PROJECT_NUM --owner "$ORG" --format json --jq '.id')
-          echo "Project ID: $PROJECT_ID"
+          # 3. Get Project ID and Field ID (The "Safe" Way)
+          # We fetch the project and its fields in one go to avoid 'owner-type' errors
+          PROJECT_DATA=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 50) {
+                    nodes {
+                      ... on ProjectV2Field { id name }
+                    }
+                  }
+                }
+              }
+            }' -f org="$ORG" -F num=$PROJECT_NUM)
 
-          # 4. Find the Item ID in the project
-          ITEM_ID=$(gh project item-list $PROJECT_NUM --owner "$ORG" --format json | \
-                    jq -r ".items[] | select(.content.url == \"$PR_URL\") | .id")
+          PROJECT_ID=$(echo "$PROJECT_DATA" | jq -r '.data.organization.projectV2.id')
+          FIELD_ID=$(echo "$PROJECT_DATA" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Approvals") | .id')
 
-          # 5. Fallback: Add PR to project if missing
-          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
-            echo "PR not in project. Adding..."
-            ITEM_ID=$(gh project item-add $PROJECT_NUM --owner "$ORG" --url "$PR_URL" --format json --jq '.id')
+          if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" == "null" ]; then
+             echo "Error: Could not find Project #$PROJECT_NUM for Org $ORG"
+             exit 1
           fi
 
-          # 6. Update the 'Approvals' field
-          # Note: If this fails with 'not a number', change --number to --text
-          gh project item-edit \
-            --id "$ITEM_ID" \
-            --project-id "$PROJECT_ID" \
-            --field "Approvals" \
-            --number "$APPROVAL_COUNT"
-          
+          # 4. Get the Item ID for this PR in the Project
+          ITEM_ID=$(gh api graphql -f query='
+            query($project: ID!, $pr_id: ID!) {
+              node(id: $pr_id) {
+                ... on PullRequest {
+                  projectItems(first: 10) {
+                    nodes {
+                      id
+                      project { id }
+                    }
+                  }
+                }
+              }
+            }' -f project="$PROJECT_ID" -f pr_id="$PR_NODE_ID" | \
+            jq -r --arg PROJ_ID "$PROJECT_ID" '.data.node.projectItems.nodes[] | select(.project.id == $PROJ_ID) | .id')
+
+          # 5. Add to project if it's missing
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
+            echo "PR not in project. Adding..."
+            ITEM_ID=$(gh api graphql -f query='
+              mutation($project: ID!, $content: ID!) {
+                addProjectV2ItemById(input: {projectId: $project, contentId: $content}) {
+                  item { id }
+                }
+              }' -f project="$PROJECT_ID" -f content="$PR_NODE_ID" | jq -r '.data.addProjectV2ItemById.item.id')
+          fi
+
+          # 6. Update the Field
+          gh api graphql -f query='
+            mutation($project: ID!, $item: ID!, $field: ID!, $value: Float!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $project,
+                itemId: $item,
+                fieldId: $field,
+                value: { number: $value }
+              }) { clientMutationId }
+            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f value="$APPROVAL_COUNT"
+
           echo "Successfully updated Approvals to $APPROVAL_COUNT"
