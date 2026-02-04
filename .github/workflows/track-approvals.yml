@@ -1,0 +1,53 @@
+name: Sync Approval Count to Project
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+jobs:
+  sync_approvals:
+    runs-on: ubuntu-latest
+    env:
+      # Using your specific PAT secret
+      GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+      # Update these to match your environment
+      ORG: "your-org-name"
+      PROJECT_NUM: 1
+      PR_URL: ${{ github.event.pull_request.html_url }}
+
+    steps:
+      - name: Calculate and Update Approvals
+        run: |
+          set -e
+
+          # 1. Get the count of unique "APPROVED" reviews
+          # This filters for the latest review status from each reviewer
+          APPROVAL_COUNT=$(gh pr view "$PR_URL" --json reviews | \
+            jq '.reviews | group_by(.author.login) | map(select(.[-1].state == "APPROVED")) | length')
+          
+          echo "Current Unique Approvals: $APPROVAL_COUNT"
+
+          # 2. Get the Project Item ID
+          # We search the project for an item matching this PR's URL
+          ITEM_DATA=$(gh project item-list $PROJECT_NUM --owner "$ORG" --format json)
+          ITEM_ID=$(echo "$ITEM_DATA" | jq -r ".items[] | select(.content.url == \"$PR_URL\") | .id")
+
+          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
+            echo "Error: PR not found in Project $PROJECT_NUM. Is the PR added to the board?"
+            exit 0
+          fi
+
+          # 3. Get the Project ID (required for the edit command)
+          PROJECT_ID=$(gh project view $PROJECT_NUM --owner "$ORG" --format json | jq -r '.id')
+
+          # 4. Update the 'Approvals' number field
+          # Ensure your Project V2 has a 'Number' type field exactly named "Approvals"
+          gh project item-edit \
+            --id "$ITEM_ID" \
+            --project-id "$PROJECT_ID" \
+            --field "Approvals" \
+            --number "$APPROVAL_COUNT"
+          
+          echo "Successfully updated Approvals to $APPROVAL_COUNT"
