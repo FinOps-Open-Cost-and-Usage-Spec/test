@@ -22,7 +22,7 @@ jobs:
           set -e
 
           # 1. Fetch Metadata (Safety check for createdAt)
-          if [ -z "$CREATED_AT" ] || [ "$CREATED_AT" == "null" ]; then
+          if [[ -z "$CREATED_AT" || "$CREATED_AT" == "null" ]]; then
              QUERY_INFO=$(gh api graphql -f query='
                query($id: ID!) {
                  node(id: $id) {
@@ -34,7 +34,7 @@ jobs:
           fi
           
           # 2. Safety check for date
-          if [ -z "$CREATED_AT" ] || [ "$CREATED_AT" == "null" ]; then
+          if [[ -z "$CREATED_AT" || "$CREATED_AT" == "null" ]]; then
             AGE_SECONDS=3600
           else
             CREATE_TS=$(date -d "$CREATED_AT" +%s)
@@ -42,48 +42,36 @@ jobs:
             AGE_SECONDS=$(( NOW_TS - CREATE_TS ))
           fi
 
-          # 3. Normalize Values for Comparison
-          # Treat empty, null, or 'None' as 0 to keep logic clean
-          [[ -z "$OLD_VAL" || "$OLD_VAL" == "null" || "$OLD_VAL" == "None" ]] && NORM_OLD="0" || NORM_OLD="$OLD_VAL"
-          [[ -z "$NEW_VAL" || "$NEW_VAL" == "null" || "$NEW_VAL" == "None" ]] && NORM_NEW="0" || NORM_NEW="$NEW_VAL"
-
-          # 4. Determine Actor and Action
+          # 3. Determine Actor
           ACTOR="${USER_LOGIN:-Automation}"
+
+          # 4. Action Logic: Priority on "Cleared", then "Initialized", then "Updated"
           
-          # Priority 1: Clear/Drop to Zero Logic
-          if [ "$ACTION_TYPE" == "cleared" ] || [ "$NORM_NEW" == "0" ]; then
-             if [ "$AGE_SECONDS" -lt 60 ]; then
-               PREFIX="**Cleared**"
-             else
-               PREFIX="**$ACTOR** cleared"
-             fi
-             
-             # ONLY show transition if it actually dropped from a positive number
-             if [ "$NORM_OLD" != "0" ]; then
-               NEW_LINE="* $PREFIX **$FIELD** ($NORM_OLD → **0**)"
+          # CASE: Cleared (Transition to zero/null)
+          if [[ "$ACTION_TYPE" == "cleared" || "$NEW_VAL" == "0" ]]; then
+             PREFIX="**$ACTOR** cleared"
+             # Only show math if there was a non-zero number before
+             if [[ -n "$OLD_VAL" && "$OLD_VAL" != "null" && "$OLD_VAL" != "0" ]]; then
+               NEW_LINE="* $PREFIX **$FIELD** ($OLD_VAL → **0**)"
              else
                NEW_LINE="* $PREFIX **$FIELD**"
              fi
-          
-          # Priority 2: Initialization (New PR)
-          elif [ "$AGE_SECONDS" -lt 60 ]; then
+
+          # CASE: Initialized (Going from null/None to a value)
+          elif [[ -z "$OLD_VAL" || "$OLD_VAL" == "null" || "$OLD_VAL" == "None" ]]; then
              PREFIX="**Initialized**"
-             NEW_LINE="* $PREFIX **$FIELD**: **$NORM_NEW**"
-          
-          # Priority 3: Standard Update
+             NEW_LINE="* $PREFIX **$FIELD**: **$NEW_VAL**"
+
+          # CASE: Updated (Changing an existing number)
           else
-             # Exit if no actual numeric change happened
-             if [ "$NORM_OLD" == "$NORM_NEW" ]; then
-               echo "No actual numeric change detected ($NORM_OLD to $NORM_NEW). Skipping."
+             # Exit if values are identical to prevent duplicate comments
+             if [[ "$OLD_VAL" == "$NEW_VAL" ]]; then
+               echo "No change detected ($OLD_VAL to $NEW_VAL). Skipping."
                exit 0
              fi
-
+             
              PREFIX="**$ACTOR** updated"
-             if [ "$NORM_OLD" == "0" ]; then
-               NEW_LINE="* $PREFIX **$FIELD**: **$NORM_NEW**"
-             else
-               NEW_LINE="* $PREFIX **$FIELD**: $NORM_OLD → **$NORM_NEW**"
-             fi
+             NEW_LINE="* $PREFIX **$FIELD**: $OLD_VAL → **$NEW_VAL**"
           fi
 
           # 5. Query for existing bot comments
@@ -98,15 +86,13 @@ jobs:
           RECENT_COMMENT=$(echo "$ALL_COMMENTS" | jq -c 'reverse | .[] | select(.viewerDidAuthor == true) | select((now - (.createdAt | fromdateiso8601)) < 300)' | head -n 1 || echo "")
 
           # 6. Append or Create Comment
-          if [ -n "$RECENT_COMMENT" ] && [ "$RECENT_COMMENT" != "" ]; then
+          if [[ -n "$RECENT_COMMENT" && "$RECENT_COMMENT" != "" ]]; then
             COMMENT_ID=$(echo "$RECENT_COMMENT" | jq -r '.id')
             EXISTING_BODY=$(echo "$RECENT_COMMENT" | jq -r '.body')
             UPDATED_BODY="${EXISTING_BODY}"$'\n'"${NEW_LINE}"
             
-            echo "Appending to existing comment $COMMENT_ID..."
             gh api graphql -f query='mutation($id: ID!, $body: String!) { updateIssueComment(input: { id: $id, body: $body }) { clientMutationId } }' -f id="$COMMENT_ID" -f body="$UPDATED_BODY"
           else
-            echo "Creating new comment..."
             NEW_BODY="🔄 **Project Update**"$'\n'"${NEW_LINE}"
             gh api graphql -f query='mutation($subject: ID!, $body: String!) { addComment(input: { subjectId: $subject, body: $body }) { commentEdge { node { id } } } }' -f subject="$ISSUE_ID" -f body="$NEW_BODY"
           fi
