@@ -1,0 +1,73 @@
+name: Sync Unresolved Threads
+on:
+  pull_request_review_thread:
+    types: [resolved, unresolved]
+  pull_request_review_comment:
+    types: [created, deleted]
+  pull_request:
+    types: [opened, ready_for_review]
+
+concurrency:
+  group: threads-${{ github.event.pull_request.id }}
+  cancel-in-progress: true
+
+jobs:
+  update-project:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync Thread Count
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          ORG: "your-org-handle"
+          PROJECT_NUM: 5
+          FIELD_NAME: "PR Open Threads"
+          PR_NODE_ID: ${{ github.event.pull_request.node_id }}
+        run: |
+          # 1. Look up Project and Field IDs
+          PROJECT_DATA=$(gh api graphql -f query='
+            query($org: String!, $num: Int!) {
+              organization(login: $org) {
+                projectV2(number: $num) {
+                  id
+                  fields(first: 50) {
+                    nodes { ... on ProjectV2Field { id name } }
+                  }
+                }
+              }
+            }' -f org="$ORG" -F num=$PROJECT_NUM)
+
+          PROJECT_ID=$(echo "$PROJECT_DATA" | jq -r '.data.organization.projectV2.id')
+          FIELD_ID=$(echo "$PROJECT_DATA" | jq -r --arg NAME "$FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$NAME) | .id')
+
+          # 2. Count unresolved threads
+          COUNT=$(gh api graphql -f query='
+            query($id: ID!) {
+              node(id: $id) {
+                ... on PullRequest {
+                  reviewThreads(last: 100) {
+                    nodes { isResolved }
+                  }
+                }
+              }
+            }' -f id="$PR_NODE_ID" --jq '[.data.node.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+
+          # 3. Find PR in Project and Update
+          ITEM_ID=$(gh api graphql -f query='
+            query($project: ID!, $pr: ID!) {
+              node(id: $project) {
+                ... on ProjectV2 {
+                  items(last: 100) {
+                    nodes { id content { ... on PullRequest { id } } }
+                  }
+                }
+              }
+            }' -f project="$PROJECT_ID" --jq ".data.node.items.nodes[] | select(.content.id == \"$PR_NODE_ID\") | .id")
+
+          if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
+            gh api graphql -f query='
+              mutation($project: ID!, $item: ID!, $field: ID!, $value: Float!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $project, itemId: $item, fieldId: $field, value: { number: $value }
+                }) { clientMutationId }
+              }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f value="$COUNT"
+          fi
