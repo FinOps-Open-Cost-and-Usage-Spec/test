@@ -2,7 +2,6 @@ name: Sync Approval Count to Project
 
 on:
   pull_request:
-    # Added 'review_requested' to trigger when you ask someone to look at the PR
     types: [opened, edited, synchronize, reopened, review_requested]
   pull_request_review:
     types: [submitted, edited, dismissed]
@@ -22,61 +21,62 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Sync Approvals
+      - name: Sync and Dispatch
         run: |
           set -e
 
-          # 1. Determine PR URL and Node ID
+          # 1. Resolve PR Metadata
           if [ "${{ github.event_name }}" == "issue_comment" ]; then
             PR_URL="${{ github.event.issue.pull_request.html_url }}"
           else
             PR_URL="${{ github.event.pull_request.html_url }}"
           fi
           
-          PR_NODE_ID=$(gh pr view "$PR_URL" --json id --jq '.id')
-          echo "Processing PR: $PR_URL (Node ID: $PR_NODE_ID)"
+          PR_DATA=$(gh pr view "$PR_URL" --json id,createdAt)
+          PR_NODE_ID=$(echo "$PR_DATA" | jq -r '.id')
+          CREATED_AT=$(echo "$PR_DATA" | jq -r '.createdAt')
 
-          # 2. Get Unique Approval Count
-          # This logic is crucial: it counts current valid approvals only.
+          # 2. Get Calculated Unique Approval Count (New Value)
           APPROVAL_COUNT=$(gh pr view "$PR_URL" --json reviews | \
             jq '.reviews | group_by(.author.login) | map(select(.[-1].state == "APPROVED")) | length')
-          echo "Current Unique Approvals: $APPROVAL_COUNT"
 
-          # 3. Get Project ID and Field ID
-          PROJECT_DATA=$(gh api graphql -f query='
+          # 3. Get Project, Field, and CURRENT Item Value (Old Value)
+          PROJECT_QUERY=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
                 projectV2(number: $num) {
                   id
-                  fields(first: 50) {
-                    nodes { ... on ProjectV2Field { id name } }
+                  fields(first: 50) { nodes { ... on ProjectV2Field { id name } } }
+                  items(first: 100) {
+                    nodes {
+                      id
+                      content { ... on PullRequest { id } }
+                      fieldValueByName(name: "Approvals") { 
+                        ... on ProjectV2ItemFieldNumberValue { number } 
+                      }
+                    }
                   }
                 }
               }
             }' -f org="$ORG" -F num=$PROJECT_NUM)
 
-          PROJECT_ID=$(echo "$PROJECT_DATA" | jq -r '.data.organization.projectV2.id')
-          FIELD_ID=$(echo "$PROJECT_DATA" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Approvals") | .id')
+          PROJECT_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.id')
+          FIELD_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Approvals") | .id')
+          
+          ITEM_DATA=$(echo "$PROJECT_QUERY" | jq -r --arg PR_ID "$PR_NODE_ID" '.data.organization.projectV2.items.nodes[] | select(.content.id == $PR_ID)')
+          ITEM_ID=$(echo "$ITEM_DATA" | jq -r '.id')
+          
+          # Capture the old value. Default to 0 if null/empty.
+          OLD_VALUE=$(echo "$ITEM_DATA" | jq -r '.fieldValueByName.number // 0')
 
-          if [ -z "$PROJECT_ID" ] || [ "$PROJECT_ID" == "null" ]; then
-             echo "Error: Could not find Project #$PROJECT_NUM"
-             exit 1
+          # 4. Change Detection Guard
+          # If the board value matches our calculated value, we stop here.
+          if [ "$OLD_VALUE" == "$APPROVAL_COUNT" ]; then
+            echo "Current board value ($OLD_VALUE) matches calculated count ($APPROVAL_COUNT). No update needed."
+            exit 0
           fi
 
-          # 4. Get the Item ID for this PR in the Project
-          ITEM_ID=$(gh api graphql -f query='
-            query($pr_id: ID!) {
-              node(id: $pr_id) {
-                ... on PullRequest {
-                  projectItems(first: 20) {
-                    nodes { id project { id } }
-                  }
-                }
-              }
-            }' -f pr_id="$PR_NODE_ID" | \
-            jq -r --arg PROJ_ID "$PROJECT_ID" '.data.node.projectItems.nodes[]? | select(.project.id == $PROJ_ID) | .id')
-
-          # 5. Add to project if it's missing
+          # 5. Add to project if missing (In case it's 0 vs 0 but item is not on board)
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
             echo "PR not in project. Adding..."
             ITEM_ID=$(gh api graphql -f query='
@@ -85,7 +85,7 @@ jobs:
               }' -f project="$PROJECT_ID" -f content="$PR_NODE_ID" | jq -r '.data.addProjectV2ItemById.item.id')
           fi
 
-          # 6. Update the Field
+          # 6. Update Project Field
           gh api graphql -f query='
             mutation($project: ID!, $item: ID!, $field: ID!, $val: Float!) {
               updateProjectV2ItemFieldValue(input: {
@@ -93,4 +93,22 @@ jobs:
               }) { clientMutationId }
             }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -F val=$APPROVAL_COUNT
 
-          echo "Successfully updated Approvals to $APPROVAL_COUNT"
+          # 7. Determine Action Type for Logger
+          if [ "$APPROVAL_COUNT" -eq 0 ] && [ "$OLD_VALUE" != "0" ]; then
+            ACTION="cleared"
+          else
+            ACTION="updated"
+          fi
+
+          # 8. Trigger Logger
+          gh api /repos/${{ github.repository }}/dispatches \
+            -f event_type="project_field_updated" \
+            -f client_payload[field_name]="Approvals" \
+            -f client_payload[old_value]="$OLD_VALUE" \
+            -f client_payload[new_value]="$APPROVAL_COUNT" \
+            -f client_payload[content_node_id]="$PR_NODE_ID" \
+            -f client_payload[created_at]="$CREATED_AT" \
+            -f client_payload[changed_by]="${{ github.actor }}" \
+            -f client_payload[action_type]="$ACTION"
+          
+          echo "Change detected: $OLD_VALUE -> $APPROVAL_COUNT. Update and dispatch complete."
