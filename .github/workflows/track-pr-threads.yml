@@ -1,57 +1,61 @@
-name: Sync Unresolved Threads
+name: Sync PR Open Threads
 on:
-  pull_request_review_thread:
-    types: [resolved, unresolved]
+  pull_request_review:
+    types: [submitted]
   pull_request_review_comment:
     types: [created, deleted]
   pull_request:
-    types: [opened, ready_for_review]
-
-concurrency:
-  group: threads-${{ github.event.pull_request.id }}
-  cancel-in-progress: true
+    types: [opened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to sync manually'
+        required: true
 
 jobs:
-  update-project:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync Thread Count
+      - name: Calculate and Sync
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
           ORG: "your-org-handle"
+          # Handles both automatic triggers and manual input
+          PR_NUM: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
           PROJECT_NUM: 5
           FIELD_NAME: "PR Open Threads"
-          PR_NODE_ID: ${{ github.event.pull_request.node_id }}
         run: |
-          # 1. Look up Project and Field IDs
-          PROJECT_DATA=$(gh api graphql -f query='
-            query($org: String!, $num: Int!) {
+          if [ -z "$PR_NUM" ]; then
+            echo "Error: No PR number found."
+            exit 1
+          fi
+
+          # 1. Get IDs and Thread Data
+          DATA=$(gh api graphql -f query='
+            query($org: String!, $p_num: Int!, $pr_num: Int!) {
               organization(login: $org) {
-                projectV2(number: $num) {
+                projectV2(number: $p_num) {
                   id
-                  fields(first: 50) {
-                    nodes { ... on ProjectV2Field { id name } }
+                  fields(first: 50) { nodes { ... on ProjectV2Field { id name } } }
+                }
+                repository(name: "${{ github.event.repository.name }}") {
+                  pullRequest(number: $pr_num) {
+                    id
+                    reviewThreads(last: 100) { nodes { isResolved } }
                   }
                 }
               }
-            }' -f org="$ORG" -F num=$PROJECT_NUM)
+            }' -f org="$ORG" -F p_num=$PROJECT_NUM -F pr_num=$PR_NUM)
 
-          PROJECT_ID=$(echo "$PROJECT_DATA" | jq -r '.data.organization.projectV2.id')
-          FIELD_ID=$(echo "$PROJECT_DATA" | jq -r --arg NAME "$FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$NAME) | .id')
+          # 2. Extract Data
+          PROJECT_ID=$(echo "$DATA" | jq -r '.data.organization.projectV2.id')
+          FIELD_ID=$(echo "$DATA" | jq -r --arg NAME "$FIELD_NAME" '.data.organization.projectV2.fields.nodes[] | select(.name==$NAME) | .id')
+          PR_NODE_ID=$(echo "$DATA" | jq -r '.data.organization.repository.pullRequest.id')
+          
+          # Added // 0 to ensure we always have a number
+          OPEN_THREADS=$(echo "$DATA" | jq -r '[.data.organization.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length // 0')
 
-          # 2. Count unresolved threads
-          COUNT=$(gh api graphql -f query='
-            query($id: ID!) {
-              node(id: $id) {
-                ... on PullRequest {
-                  reviewThreads(last: 100) {
-                    nodes { isResolved }
-                  }
-                }
-              }
-            }' -f id="$PR_NODE_ID" --jq '[.data.node.reviewThreads.nodes[] | select(.isResolved == false)] | length')
-
-          # 3. Find PR in Project and Update
+          # 3. Find Project Item ID
           ITEM_ID=$(gh api graphql -f query='
             query($project: ID!, $pr: ID!) {
               node(id: $project) {
@@ -63,11 +67,15 @@ jobs:
               }
             }' -f project="$PROJECT_ID" --jq ".data.node.items.nodes[] | select(.content.id == \"$PR_NODE_ID\") | .id")
 
+          # 4. Update Field
           if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
             gh api graphql -f query='
               mutation($project: ID!, $item: ID!, $field: ID!, $value: Float!) {
                 updateProjectV2ItemFieldValue(input: {
                   projectId: $project, itemId: $item, fieldId: $field, value: { number: $value }
                 }) { clientMutationId }
-              }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f value="$COUNT"
+              }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f value=$OPEN_THREADS
+            echo "Successfully updated '$FIELD_NAME' to $OPEN_THREADS for PR #$PR_NUM"
+          else
+            echo "PR #$PR_NUM not found in project. Skipping update."
           fi
