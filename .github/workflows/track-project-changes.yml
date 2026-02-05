@@ -42,39 +42,51 @@ jobs:
             AGE_SECONDS=$(( NOW_TS - CREATE_TS ))
           fi
 
-          # 3. Determine Actor and Action
+          # 3. Normalize Values for Comparison
+          # Treat empty, null, or 'None' as 0 to keep logic clean
+          [[ -z "$OLD_VAL" || "$OLD_VAL" == "null" || "$OLD_VAL" == "None" ]] && NORM_OLD="0" || NORM_OLD="$OLD_VAL"
+          [[ -z "$NEW_VAL" || "$NEW_VAL" == "null" || "$NEW_VAL" == "None" ]] && NORM_NEW="0" || NORM_NEW="$NEW_VAL"
+
+          # 4. Determine Actor and Action
           ACTOR="${USER_LOGIN:-Automation}"
           
           # Priority 1: Clear/Drop to Zero Logic
-          if [ "$ACTION_TYPE" == "cleared" ]; then
+          if [ "$ACTION_TYPE" == "cleared" ] || [ "$NORM_NEW" == "0" ]; then
              if [ "$AGE_SECONDS" -lt 60 ]; then
                PREFIX="**Cleared**"
              else
                PREFIX="**$ACTOR** cleared"
              fi
-             # Show the transition to zero if we have an old value
-             if [ "$OLD_VAL" != "0" ] && [ -n "$OLD_VAL" ]; then
-               NEW_LINE="* $PREFIX **$FIELD** ($OLD_VAL → **0**)"
+             
+             # ONLY show transition if it actually dropped from a positive number
+             if [ "$NORM_OLD" != "0" ]; then
+               NEW_LINE="* $PREFIX **$FIELD** ($NORM_OLD → **0**)"
              else
                NEW_LINE="* $PREFIX **$FIELD**"
              fi
           
-          # Priority 2: Initialization
+          # Priority 2: Initialization (New PR)
           elif [ "$AGE_SECONDS" -lt 60 ]; then
              PREFIX="**Initialized**"
-             NEW_LINE="* $PREFIX **$FIELD**: **$NEW_VAL**"
+             NEW_LINE="* $PREFIX **$FIELD**: **$NORM_NEW**"
           
           # Priority 3: Standard Update
           else
+             # Exit if no actual numeric change happened
+             if [ "$NORM_OLD" == "$NORM_NEW" ]; then
+               echo "No actual numeric change detected ($NORM_OLD to $NORM_NEW). Skipping."
+               exit 0
+             fi
+
              PREFIX="**$ACTOR** updated"
-             if [ -z "$OLD_VAL" ] || [ "$OLD_VAL" == "0" ] || [ "$OLD_VAL" == "null" ]; then
-               NEW_LINE="* $PREFIX **$FIELD**: **$NEW_VAL**"
+             if [ "$NORM_OLD" == "0" ]; then
+               NEW_LINE="* $PREFIX **$FIELD**: **$NORM_NEW**"
              else
-               NEW_LINE="* $PREFIX **$FIELD**: $OLD_VAL → **$NEW_VAL**"
+               NEW_LINE="* $PREFIX **$FIELD**: $NORM_OLD → **$NORM_NEW**"
              fi
           fi
 
-          # 4. Query for existing bot comments
+          # 5. Query for existing bot comments
           QUERY_LATEST='query($id: ID!) { 
             node(id: $id) { 
               ... on Issue { comments(last: 20) { nodes { id body createdAt viewerDidAuthor } } }
@@ -85,14 +97,16 @@ jobs:
           ALL_COMMENTS=$(gh api graphql -f query="$QUERY_LATEST" -f id="$ISSUE_ID" --jq '.data.node.comments.nodes // []')
           RECENT_COMMENT=$(echo "$ALL_COMMENTS" | jq -c 'reverse | .[] | select(.viewerDidAuthor == true) | select((now - (.createdAt | fromdateiso8601)) < 300)' | head -n 1 || echo "")
 
-          # 5. Append or Create Comment
+          # 6. Append or Create Comment
           if [ -n "$RECENT_COMMENT" ] && [ "$RECENT_COMMENT" != "" ]; then
             COMMENT_ID=$(echo "$RECENT_COMMENT" | jq -r '.id')
             EXISTING_BODY=$(echo "$RECENT_COMMENT" | jq -r '.body')
             UPDATED_BODY="${EXISTING_BODY}"$'\n'"${NEW_LINE}"
             
+            echo "Appending to existing comment $COMMENT_ID..."
             gh api graphql -f query='mutation($id: ID!, $body: String!) { updateIssueComment(input: { id: $id, body: $body }) { clientMutationId } }' -f id="$COMMENT_ID" -f body="$UPDATED_BODY"
           else
+            echo "Creating new comment..."
             NEW_BODY="🔄 **Project Update**"$'\n'"${NEW_LINE}"
             gh api graphql -f query='mutation($subject: ID!, $body: String!) { addComment(input: { subjectId: $subject, body: $body }) { commentEdge { node { id } } } }' -f subject="$ISSUE_ID" -f body="$NEW_BODY"
           fi
