@@ -22,10 +22,9 @@ jobs:
       - name: Calculate and Sync
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
-          ORG: "FinOps-Open-Cost-and-Usage-Spec"
-          PROJECT_NUM: 7
+          ORG: "FinOps-Open-Cost-and-Usage-Spec"        # Change to your Org name
+          PROJECT_NUM: 7                                # Change to your Project number
           FIELD_NAME: "PR Open Threads"
-          # Detects if this is a single PR event or a bulk sync
           SINGLE_PR: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
         run: |
           # 1. Fetch Project and Field IDs
@@ -80,9 +79,9 @@ jobs:
 
             COUNT=$(echo "$PR_DATA" | jq -r '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length // 0')
 
-            # Find the Item ID (the link between the PR and the Project)
+            # Find the Item ID in the Project (Variable declaration fixed here)
             ITEM_ID=$(gh api graphql -f query='
-              query($project: ID!, $pr: ID!) {
+              query($project: ID!) {
                 node(id: $project) {
                   ... on ProjectV2 {
                     items(last: 100) { nodes { id content { ... on PullRequest { id } } } }
