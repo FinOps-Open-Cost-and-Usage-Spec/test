@@ -3,17 +3,17 @@ name: Sync Review Counts to Project
 on:
   pull_request:
     types: 
-      - opened            # PR created: Initialize counts at 0
-      - synchronize       # New code pushed: Reviews often become stale
-      - reopened          # PR reopened: Refresh project state
-      - review_requested  # Reviewer invited: Signals state reset
+      - opened
+      - synchronize
+      - reopened
+      - review_requested
   pull_request_review:
     types: 
-      - submitted         # Review left: Primary driver for counts
-      - dismissed         # Review removed: 1 -> 0 drops
+      - submitted
+      - dismissed
   issue_comment:
     types: 
-      - created           # Comment added: Manual "force sync"
+      - created
 
 jobs:
   sync_reviews:
@@ -79,13 +79,13 @@ jobs:
           OLD_APP=$(echo "$ITEM_DATA" | jq -r '.app_val.number // 0 | floor')
           OLD_REQ=$(echo "$ITEM_DATA" | jq -r '.req_val.number // 0 | floor')
 
-          # 4. CONSTRAINT: Skip only if both counts are unchanged AND it is not a manual/review event
+          # 4. CONSTRAINT
           if [ "$OLD_APP" == "$APP_COUNT" ] && [ "$OLD_REQ" == "$REQ_COUNT" ] && [ -n "$ITEM_ID" ] && [ "${{ github.event_name }}" == "pull_request" ]; then
             echo "No changes detected. Exiting."
             exit 0
           fi
 
-          # 5. Add/Update Project Item
+          # 5. Update Project Board
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
             ITEM_ID=$(gh api graphql -f query='
               mutation($project: ID!, $content: ID!) {
@@ -93,22 +93,20 @@ jobs:
               }' -f project="$PROJECT_ID" -f content="$PR_NODE_ID" | jq -r '.data.addProjectV2ItemById.item.id')
           fi
 
-          # Update Board Fields
           gh api graphql -f query='
-            mutation($project: ID!, $item: ID!, $field: ID!, $val: Float!) {
-              updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { number: $val } }) { clientMutationId }
-            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$APP_FIELD_ID" -F val=$APP_COUNT
+            mutation($p: ID!, $i: ID!, $f: ID!, $v: Float!) {
+              updateProjectV2ItemFieldValue(input: { projectId: $p, itemId: $i, fieldId: $f, value: { number: $v } }) { clientMutationId }
+            }' -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$APP_FIELD_ID" -F v=$APP_COUNT
 
           gh api graphql -f query='
-            mutation($project: ID!, $item: ID!, $field: ID!, $val: Float!) {
-              updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { number: $val } }) { clientMutationId }
-            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$REQ_FIELD_ID" -F val=$REQ_COUNT
+            mutation($p: ID!, $i: ID!, $f: ID!, $v: Float!) {
+              updateProjectV2ItemFieldValue(input: { projectId: $p, itemId: $i, fieldId: $f, value: { number: $v } }) { clientMutationId }
+            }' -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$REQ_FIELD_ID" -F v=$REQ_COUNT
 
-          # 6. TRIGGER THE LOGGER (Staggered Dispatch)
+          # 6. TRIGGER THE LOGGER (Staggered Dispatch as "Review Bot")
           
-          # Handle Approvals
           if [ "$OLD_APP" != "$APP_COUNT" ]; then
-            echo "Dispatching Approvals update ($OLD_APP -> $APP_COUNT)..."
+            echo "Dispatching Approvals ($OLD_APP -> $APP_COUNT)..."
             gh api /repos/${{ github.repository }}/dispatches \
               -f event_type="project_field_updated" \
               -f client_payload[field_name]="Approvals" \
@@ -116,16 +114,14 @@ jobs:
               -f client_payload[new_value]="$APP_COUNT" \
               -f client_payload[content_node_id]="$PR_NODE_ID" \
               -f client_payload[created_at]="$CREATED_AT" \
-              -f client_payload[changed_by]="${{ github.actor }}" \
+              -f client_payload[changed_by]="Review Bot" \
               -f client_payload[action_type]="updated"
             
-            # Wait to avoid race condition in Logger script
             sleep 10
           fi
 
-          # Handle Requested Changes
           if [ "$OLD_REQ" != "$REQ_COUNT" ]; then
-            echo "Dispatching Requested Changes update ($OLD_REQ -> $REQ_COUNT)..."
+            echo "Dispatching Requested Changes ($OLD_REQ -> $REQ_COUNT)..."
             gh api /repos/${{ github.repository }}/dispatches \
               -f event_type="project_field_updated" \
               -f client_payload[field_name]="Requested Changes" \
@@ -133,6 +129,6 @@ jobs:
               -f client_payload[new_value]="$REQ_COUNT" \
               -f client_payload[content_node_id]="$PR_NODE_ID" \
               -f client_payload[created_at]="$CREATED_AT" \
-              -f client_payload[changed_by]="${{ github.actor }}" \
+              -f client_payload[changed_by]="Review Bot" \
               -f client_payload[action_type]="updated"
           fi
