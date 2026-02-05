@@ -19,10 +19,10 @@ export default async function handler(req, res) {
     return res.status(200).send('Action ignored: Not a relevant edit.');
   }
 
-  // 3. Extract Field Context
-  const fieldName = changes?.field_value?.field_name || "Unknown Field";
+  // 3. Extract Field Context & Filtering
+  const fieldName = changes?.field_value?.field_name || "Unknown Field";
   
-  // Suppress all core GitHub metadata fields
+  // List of core GitHub metadata fields to suppress
   const ignoredFields = [
       "Status", 
       "Title", 
@@ -43,22 +43,26 @@ export default async function handler(req, res) {
       "Item Type"
     ];
 
-  if (ignoredFields.includes(fieldName)) {
-    return res.status(200).send(`Action ignored: ${fieldName} field excluded.`);
-  }
+  if (ignoredFields.includes(fieldName)) {
+    return res.status(200).send(`Action ignored: ${fieldName} field excluded.`);
+  }
 
-  // 4. Detect "Cleared" state (Missing 'to' key)
-  const isCleared = changes?.field_value && !('to' in changes.field_value);
+  // 4. Improved Detect "Cleared" vs "Updated"
+  // Logic: It's only 'cleared' if 'to' is missing or null. Numeric 0 should NOT be cleared.
+  const rawTo = changes?.field_value?.to;
+  const isCleared = (rawTo === null || rawTo === undefined) && !('to' in (changes?.field_value || {}));
 
-  // 5. Value Parsing Helper
+  // 5. Value Parsing Helper (Specifically handle numeric 0)
   const parseVal = (val) => {
-    if (val === undefined || val === null) return "None";
+    if (val === undefined || val === null || val === "") return "None";
+    // Ensure 0 is treated as a valid string value
+    if (val === 0 || val === "0") return "0"; 
     if (typeof val === 'object') return val.name || val.text || val.date || "None";
     return String(val).split('T')[0].split('+')[0];
   };
 
   const oldValue = parseVal(changes?.field_value?.from);
-  const newValue = isCleared ? "blank" : parseVal(changes?.field_value?.to);
+  const newValue = isCleared ? "blank" : parseVal(rawTo);
 
   // 6. Dispatch to GitHub Actions
   try {
