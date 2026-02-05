@@ -22,8 +22,8 @@ jobs:
       - name: Calculate and Sync
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
-          ORG: "FinOps-Open-Cost-and-Usage-Spec"        # Change to your Org name
-          PROJECT_NUM: 7                                # Change to your Project number
+          ORG: "FinOps-Open-Cost-and-Usage-Spec"
+          PROJECT_NUM: 7
           FIELD_NAME: "PR Open Threads"
           SINGLE_PR: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
         run: |
@@ -79,7 +79,7 @@ jobs:
 
             COUNT=$(echo "$PR_DATA" | jq -r '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length // 0')
 
-            # Find the Item ID in the Project (Variable declaration fixed here)
+            # Find the Item ID in the Project
             ITEM_ID=$(gh api graphql -f query='
               query($project: ID!) {
                 node(id: $project) {
@@ -90,12 +90,13 @@ jobs:
               }' -f project="$PROJECT_ID" --jq ".data.node.items.nodes[] | select(.content.id == \"$PR_NODE_ID\") | .id")
 
             if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
+              # FIXED: Using -F (uppercase) for the value so it is sent as a number, not a string
               gh api graphql -f query='
                 mutation($project: ID!, $item: ID!, $field: ID!, $value: Float!) {
                   updateProjectV2ItemFieldValue(input: {
                     projectId: $project, itemId: $item, fieldId: $field, value: { number: $value }
                   }) { clientMutationId }
-                }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -f value=$COUNT
+                }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -F value=$COUNT
               echo "Successfully updated PR #$NUM to $COUNT open threads."
             else
               echo "PR #$NUM is not on the project board. Skipping."
