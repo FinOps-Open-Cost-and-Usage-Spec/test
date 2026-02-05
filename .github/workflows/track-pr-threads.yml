@@ -1,10 +1,7 @@
 name: Sync PR Open Threads
 on:
   schedule:
-    # Runs every 4 hours to catch "silent" resolves
     - cron: '0 */4 * * *'
-  pull_request_review:
-    types: [submitted]
   pull_request_review_comment:
     types: [created, deleted]
   pull_request:
@@ -17,6 +14,11 @@ on:
 
 jobs:
   sync:
+    # Adding concurrency is the final layer of protection.
+    # If two events DO happen at once, GitHub will cancel the first one.
+    concurrency:
+      group: sync-threads-${{ github.event.pull_request.id || 'bulk' }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - name: Calculate and Sync
@@ -46,20 +48,17 @@ jobs:
             exit 1
           fi
 
-          # 2. Identify which PRs to process
+          # 2. Identify PRs
           if [ -n "$SINGLE_PR" ]; then
-            echo "Targeting single PR: #$SINGLE_PR"
             PR_LIST=($SINGLE_PR)
           else
-            echo "Running bulk sync for all open PRs..."
             PR_LIST=($(gh pr list --state open --json number --jq '.[].number'))
           fi
 
-          # 3. Loop through PRs and update the Project
+          # 3. Loop and Update
           for NUM in "${PR_LIST[@]}"; do
             echo "--- Processing PR #$NUM ---"
             
-            # Fetch Thread Count and PR Node ID
             PR_DATA=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
@@ -71,15 +70,10 @@ jobs:
               }' -f org="$ORG" -f repo="${{ github.event.repository.name }}" -F num=$NUM)
 
             PR_NODE_ID=$(echo "$PR_DATA" | jq -r '.data.repository.pullRequest.id')
-            
-            if [ -z "$PR_NODE_ID" ] || [ "$PR_NODE_ID" == "null" ]; then
-              echo "Could not find PR #$NUM. Skipping."
-              continue
-            fi
+            if [ -z "$PR_NODE_ID" ] || [ "$PR_NODE_ID" == "null" ]; then continue; fi
 
             COUNT=$(echo "$PR_DATA" | jq -r '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length // 0')
 
-            # Find the Item ID in the Project
             ITEM_ID=$(gh api graphql -f query='
               query($project: ID!) {
                 node(id: $project) {
@@ -90,15 +84,12 @@ jobs:
               }' -f project="$PROJECT_ID" --jq ".data.node.items.nodes[] | select(.content.id == \"$PR_NODE_ID\") | .id")
 
             if [ -n "$ITEM_ID" ] && [ "$ITEM_ID" != "null" ]; then
-              # FIXED: Using -F (uppercase) for the value so it is sent as a number, not a string
               gh api graphql -f query='
                 mutation($project: ID!, $item: ID!, $field: ID!, $value: Float!) {
                   updateProjectV2ItemFieldValue(input: {
                     projectId: $project, itemId: $item, fieldId: $field, value: { number: $value }
                   }) { clientMutationId }
                 }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -F value=$COUNT
-              echo "Successfully updated PR #$NUM to $COUNT open threads."
-            else
-              echo "PR #$NUM is not on the project board. Skipping."
+              echo "Successfully updated PR #$NUM to $COUNT."
             fi
           done
