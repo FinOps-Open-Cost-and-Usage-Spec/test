@@ -4,16 +4,16 @@ on:
   pull_request:
     types: 
       - opened            # PR created: Initialize counts at 0
-      - synchronize       # New code pushed: Reviews often become stale/dismissed
+      - synchronize       # New code pushed: Reviews often become stale
       - reopened          # PR reopened: Refresh project state
-      - review_requested  # Reviewer invited: Signals a shift in review state
+      - review_requested  # Reviewer invited: Signals state reset
   pull_request_review:
     types: 
-      - submitted         # Review left: The primary driver for Approvals/Changes
-      - dismissed         # Review removed: Necessary for count drops (1 -> 0)
+      - submitted         # Review left: Primary driver for counts
+      - dismissed         # Review removed: 1 -> 0 drops
   issue_comment:
     types: 
-      - created           # Comment added: Serves as a manual "force sync"
+      - created           # Comment added: Manual "force sync"
 
 jobs:
   sync_reviews:
@@ -49,7 +49,7 @@ jobs:
           APP_COUNT=$(echo "$REVIEWS_JSON" | jq 'map(select(.state == "APPROVED")) | length')
           REQ_COUNT=$(echo "$REVIEWS_JSON" | jq 'map(select(.state == "CHANGES_REQUESTED")) | length')
 
-          # 3. Get Project Metadata and Current Board Values
+          # 3. Get Project Metadata and Current Values
           PROJECT_QUERY=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -104,13 +104,11 @@ jobs:
               updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { number: $val } }) { clientMutationId }
             }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$REQ_FIELD_ID" -F val=$REQ_COUNT
 
-          # 6. TRIGGER THE LOGGER (Staggered)
+          # 6. TRIGGER THE LOGGER (Staggered Dispatch)
           
           # Handle Approvals
           if [ "$OLD_APP" != "$APP_COUNT" ]; then
-            ACT_APP="updated"
-            [ "$APP_COUNT" -eq 0 ] && ACT_APP="cleared"
-            echo "Dispatching Approvals..."
+            echo "Dispatching Approvals update ($OLD_APP -> $APP_COUNT)..."
             gh api /repos/${{ github.repository }}/dispatches \
               -f event_type="project_field_updated" \
               -f client_payload[field_name]="Approvals" \
@@ -119,17 +117,15 @@ jobs:
               -f client_payload[content_node_id]="$PR_NODE_ID" \
               -f client_payload[created_at]="$CREATED_AT" \
               -f client_payload[changed_by]="${{ github.actor }}" \
-              -f client_payload[action_type]="$ACT_APP"
+              -f client_payload[action_type]="updated"
             
-            # Wait for Logger instance 1 to finish
+            # Wait to avoid race condition in Logger script
             sleep 10
           fi
 
           # Handle Requested Changes
           if [ "$OLD_REQ" != "$REQ_COUNT" ]; then
-            ACT_REQ="updated"
-            [ "$REQ_COUNT" -eq 0 ] && ACT_REQ="cleared"
-            echo "Dispatching Requested Changes..."
+            echo "Dispatching Requested Changes update ($OLD_REQ -> $REQ_COUNT)..."
             gh api /repos/${{ github.repository }}/dispatches \
               -f event_type="project_field_updated" \
               -f client_payload[field_name]="Requested Changes" \
@@ -138,5 +134,5 @@ jobs:
               -f client_payload[content_node_id]="$PR_NODE_ID" \
               -f client_payload[created_at]="$CREATED_AT" \
               -f client_payload[changed_by]="${{ github.actor }}" \
-              -f client_payload[action_type]="$ACT_REQ"
+              -f client_payload[action_type]="updated"
           fi
