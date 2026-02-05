@@ -21,7 +21,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Sync and Dispatch
+      - name: Sync Approvals
         run: |
           set -e
 
@@ -32,15 +32,14 @@ jobs:
             PR_URL="${{ github.event.pull_request.html_url }}"
           fi
           
-          PR_DATA=$(gh pr view "$PR_URL" --json id,createdAt)
-          PR_NODE_ID=$(echo "$PR_DATA" | jq -r '.id')
-          CREATED_AT=$(echo "$PR_DATA" | jq -r '.createdAt')
+          PR_NODE_ID=$(gh pr view "$PR_URL" --json id --jq '.id')
+          echo "Processing PR: $PR_URL"
 
-          # 2. Get Calculated Unique Approval Count (New Value)
+          # 2. Get Calculated Unique Approval Count
           APPROVAL_COUNT=$(gh pr view "$PR_URL" --json reviews | \
             jq '.reviews | group_by(.author.login) | map(select(.[-1].state == "APPROVED")) | length')
 
-          # 3. Get Project, Field, and CURRENT Item Value (Old Value)
+          # 3. Get Project, Field, and CURRENT Value
           PROJECT_QUERY=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -66,17 +65,17 @@ jobs:
           ITEM_DATA=$(echo "$PROJECT_QUERY" | jq -r --arg PR_ID "$PR_NODE_ID" '.data.organization.projectV2.items.nodes[] | select(.content.id == $PR_ID)')
           ITEM_ID=$(echo "$ITEM_DATA" | jq -r '.id')
           
-          # Capture the old value. Default to 0 if null/empty.
-          OLD_VALUE=$(echo "$ITEM_DATA" | jq -r '.fieldValueByName.number // 0')
+          # Use printf to force float comparison or integer casting
+          OLD_VALUE=$(echo "$ITEM_DATA" | jq -r '.fieldValueByName.number // 0 | floor')
+          NEW_VALUE=$((APPROVAL_COUNT))
 
           # 4. Change Detection Guard
-          # If the board value matches our calculated value, we stop here.
-          if [ "$OLD_VALUE" == "$APPROVAL_COUNT" ]; then
-            echo "Current board value ($OLD_VALUE) matches calculated count ($APPROVAL_COUNT). No update needed."
+          if [ "$OLD_VALUE" -eq "$NEW_VALUE" ] && [ -n "$ITEM_ID" ]; then
+            echo "Board already shows $NEW_VALUE approvals. Skipping update."
             exit 0
           fi
 
-          # 5. Add to project if missing (In case it's 0 vs 0 but item is not on board)
+          # 5. Add to project if missing
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
             echo "PR not in project. Adding..."
             ITEM_ID=$(gh api graphql -f query='
@@ -86,29 +85,12 @@ jobs:
           fi
 
           # 6. Update Project Field
+          # This change will trigger the Webhook, which in turn triggers the Logger
           gh api graphql -f query='
             mutation($project: ID!, $item: ID!, $field: ID!, $val: Float!) {
               updateProjectV2ItemFieldValue(input: {
                 projectId: $project, itemId: $item, fieldId: $field, value: { number: $val }
               }) { clientMutationId }
-            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -F val=$APPROVAL_COUNT
-
-          # 7. Determine Action Type for Logger
-          if [ "$APPROVAL_COUNT" -eq 0 ] && [ "$OLD_VALUE" != "0" ]; then
-            ACTION="cleared"
-          else
-            ACTION="updated"
-          fi
-
-          # 8. Trigger Logger
-          gh api /repos/${{ github.repository }}/dispatches \
-            -f event_type="project_field_updated" \
-            -f client_payload[field_name]="Approvals" \
-            -f client_payload[old_value]="$OLD_VALUE" \
-            -f client_payload[new_value]="$APPROVAL_COUNT" \
-            -f client_payload[content_node_id]="$PR_NODE_ID" \
-            -f client_payload[created_at]="$CREATED_AT" \
-            -f client_payload[changed_by]="${{ github.actor }}" \
-            -f client_payload[action_type]="$ACTION"
+            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -F val=$NEW_VALUE
           
-          echo "Change detected: $OLD_VALUE -> $APPROVAL_COUNT. Update and dispatch complete."
+          echo "Successfully updated Approvals to $NEW_VALUE."
