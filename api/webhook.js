@@ -20,10 +20,32 @@ export default async function handler(req, res) {
   }
 
   // 3. Extract Field Context
-  const fieldName = changes?.field_value?.field_name || "Unknown Field";
-  if (fieldName === "Status") {
-    return res.status(200).send('Action ignored: Status field excluded.');
-  }
+  const fieldName = changes?.field_value?.field_name || "Unknown Field";
+  
+  // Suppress all core GitHub metadata fields
+  const ignoredFields = [
+      "Status", 
+      "Title", 
+      "Label", 
+      "Labels", 
+      "Assignee", 
+      "Assignees", 
+      "Milestone", 
+      "Milestones",
+      "Reviewer",
+      "Reviewers",
+      "Development",
+      "Repository",
+      "Linked pull request",
+      "Linked pull requests",
+      "Tracked by",
+      "Tracks",
+      "Item Type"
+    ];
+
+  if (ignoredFields.includes(fieldName)) {
+    return res.status(200).send(`Action ignored: ${fieldName} field excluded.`);
+  }
 
   // 4. Detect "Cleared" state (Missing 'to' key)
   const isCleared = changes?.field_value && !('to' in changes.field_value);
