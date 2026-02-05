@@ -3,21 +3,18 @@ name: Sync Review Counts to Project
 on:
   pull_request:
     types: 
-      - opened
-      - synchronize
-      - reopened
-      - review_requested
+      - opened            # PR created: Initialize counts at 0
+      - synchronize       # New code pushed: Reviews often become stale
+      - reopened          # PR reopened: Refresh project state
+      - review_requested  # Reviewer invited: Signals state reset
   pull_request_review:
     types: 
-      - submitted
-      - dismissed
-  issue_comment:
-    types: 
-      - created
+      - submitted         # Review left: Primary driver for counts
+      - dismissed         # Review removed: 1 -> 0 drops
 
 jobs:
   sync_reviews:
-    if: github.event.issue.pull_request || github.event.pull_request
+    if: github.event.pull_request
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.PROJECT_PAT }}
@@ -33,12 +30,7 @@ jobs:
           set -e
 
           # 1. Resolve PR Metadata
-          if [ "${{ github.event_name }}" == "issue_comment" ]; then
-            PR_URL="${{ github.event.issue.pull_request.html_url }}"
-          else
-            PR_URL="${{ github.event.pull_request.html_url }}"
-          fi
-          
+          PR_URL="${{ github.event.pull_request.html_url }}"
           PR_DATA=$(gh pr view "$PR_URL" --json id,createdAt)
           PR_NODE_ID=$(echo "$PR_DATA" | jq -r '.id')
           CREATED_AT=$(echo "$PR_DATA" | jq -r '.createdAt')
@@ -49,7 +41,8 @@ jobs:
           APP_COUNT=$(echo "$REVIEWS_JSON" | jq 'map(select(.state == "APPROVED")) | length')
           REQ_COUNT=$(echo "$REVIEWS_JSON" | jq 'map(select(.state == "CHANGES_REQUESTED")) | length')
 
-          # 3. Get Project Metadata and Current Values
+          # 3. Get Project Metadata and Current Board Values
+          # Updated field names: "PR Approvals" and "PR Change Requests"
           PROJECT_QUERY=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -60,8 +53,8 @@ jobs:
                     nodes {
                       id
                       content { ... on PullRequest { id } }
-                      app_val: fieldValueByName(name: "Approvals") { ... on ProjectV2ItemFieldNumberValue { number } }
-                      req_val: fieldValueByName(name: "Requested Changes") { ... on ProjectV2ItemFieldNumberValue { number } }
+                      app_val: fieldValueByName(name: "PR Approvals") { ... on ProjectV2ItemFieldNumberValue { number } }
+                      req_val: fieldValueByName(name: "PR Change Requests") { ... on ProjectV2ItemFieldNumberValue { number } }
                     }
                   }
                 }
@@ -69,8 +62,8 @@ jobs:
             }' -f org="$ORG" -F num=$PROJECT_NUM)
 
           PROJECT_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.id')
-          APP_FIELD_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Approvals") | .id')
-          REQ_FIELD_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Requested Changes") | .id')
+          APP_FIELD_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "PR Approvals") | .id')
+          REQ_FIELD_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "PR Change Requests") | .id')
           
           ITEM_DATA=$(echo "$PROJECT_QUERY" | jq -r --arg PR_ID "$PR_NODE_ID" '.data.organization.projectV2.items.nodes[] | select(.content.id == $PR_ID)')
           ITEM_ID=$(echo "$ITEM_DATA" | jq -r '.id')
@@ -79,13 +72,13 @@ jobs:
           OLD_APP=$(echo "$ITEM_DATA" | jq -r '.app_val.number // 0 | floor')
           OLD_REQ=$(echo "$ITEM_DATA" | jq -r '.req_val.number // 0 | floor')
 
-          # 4. CONSTRAINT
+          # 4. CONSTRAINT: Skip only if both counts are unchanged AND it is not a manual/review event
           if [ "$OLD_APP" == "$APP_COUNT" ] && [ "$OLD_REQ" == "$REQ_COUNT" ] && [ -n "$ITEM_ID" ] && [ "${{ github.event_name }}" == "pull_request" ]; then
             echo "No changes detected. Exiting."
             exit 0
           fi
 
-          # 5. Update Project Board
+          # 5. Add/Update Project Item
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
             ITEM_ID=$(gh api graphql -f query='
               mutation($project: ID!, $content: ID!) {
@@ -93,6 +86,7 @@ jobs:
               }' -f project="$PROJECT_ID" -f content="$PR_NODE_ID" | jq -r '.data.addProjectV2ItemById.item.id')
           fi
 
+          # Update Board Fields
           gh api graphql -f query='
             mutation($p: ID!, $i: ID!, $f: ID!, $v: Float!) {
               updateProjectV2ItemFieldValue(input: { projectId: $p, itemId: $i, fieldId: $f, value: { number: $v } }) { clientMutationId }
@@ -105,11 +99,12 @@ jobs:
 
           # 6. TRIGGER THE LOGGER (Staggered Dispatch as "Review Bot")
           
+          # Handle PR Approvals
           if [ "$OLD_APP" != "$APP_COUNT" ]; then
-            echo "Dispatching Approvals ($OLD_APP -> $APP_COUNT)..."
+            echo "Dispatching PR Approvals ($OLD_APP -> $APP_COUNT)..."
             gh api /repos/${{ github.repository }}/dispatches \
               -f event_type="project_field_updated" \
-              -f client_payload[field_name]="Approvals" \
+              -f client_payload[field_name]="PR Approvals" \
               -f client_payload[old_value]="$OLD_APP" \
               -f client_payload[new_value]="$APP_COUNT" \
               -f client_payload[content_node_id]="$PR_NODE_ID" \
@@ -120,11 +115,12 @@ jobs:
             sleep 10
           fi
 
+          # Handle PR Change Requests
           if [ "$OLD_REQ" != "$REQ_COUNT" ]; then
-            echo "Dispatching Requested Changes ($OLD_REQ -> $REQ_COUNT)..."
+            echo "Dispatching PR Change Requests ($OLD_REQ -> $REQ_COUNT)..."
             gh api /repos/${{ github.repository }}/dispatches \
               -f event_type="project_field_updated" \
-              -f client_payload[field_name]="Requested Changes" \
+              -f client_payload[field_name]="PR Change Requests" \
               -f client_payload[old_value]="$OLD_REQ" \
               -f client_payload[new_value]="$REQ_COUNT" \
               -f client_payload[content_node_id]="$PR_NODE_ID" \
