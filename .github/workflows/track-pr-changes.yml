@@ -1,22 +1,22 @@
-name: Sync Approval Count to Project
+name: Sync Review Counts to Project
 
 on:
   pull_request:
     types: 
-      - opened            # PR created: Initialize count at 0
-      - synchronize       # New code pushed: Approvals may be dismissed
-      - reopened          # PR reopened: Refresh state
-      - review_requested  # Reviewer invited: State change
+      - opened            # PR created: Initialize counts at 0
+      - synchronize       # New code pushed: Reviews often become stale/dismissed
+      - reopened          # PR reopened: Refresh project state
+      - review_requested  # Reviewer invited: Signals a shift in review state
   pull_request_review:
     types: 
-      - submitted         # Review left: The primary count driver
-      - dismissed         # Review removed: Necessary for 1 -> 0 drops
+      - submitted         # Review left: The primary driver for Approvals/Changes
+      - dismissed         # Review removed: Necessary for count drops (1 -> 0)
   issue_comment:
     types: 
       - created           # Comment added: Serves as a manual "force sync"
 
 jobs:
-  sync_approvals:
+  sync_reviews:
     if: github.event.issue.pull_request || github.event.pull_request
     runs-on: ubuntu-latest
     env:
@@ -43,12 +43,14 @@ jobs:
           PR_NODE_ID=$(echo "$PR_DATA" | jq -r '.id')
           CREATED_AT=$(echo "$PR_DATA" | jq -r '.createdAt')
 
-          # 2. Get Calculated Unique Approval Count
-          # Filter: Group by user, check if the latest state is 'APPROVED'
-          APPROVAL_COUNT=$(gh pr view "$PR_URL" --json reviews | \
-            jq '.reviews | group_by(.author.login) | map(select(.[-1].state == "APPROVED")) | length')
+          # 2. Get Calculated Counts (Latest state per user)
+          # We group reviews by author and take only the most recent submission per person.
+          REVIEWS_JSON=$(gh pr view "$PR_URL" --json reviews | jq -c '.reviews | group_by(.author.login) | map(sort_by(.submittedAt) | .[-1])')
+          
+          APP_COUNT=$(echo "$REVIEWS_JSON" | jq 'map(select(.state == "APPROVED")) | length')
+          REQ_COUNT=$(echo "$REVIEWS_JSON" | jq 'map(select(.state == "CHANGES_REQUESTED")) | length')
 
-          # 3. Get Project, Field, and CURRENT Value for Comparison
+          # 3. Get Project Metadata and Current Board Values
           PROJECT_QUERY=$(gh api graphql -f query='
             query($org: String!, $num: Int!) {
               organization(login: $org) {
@@ -59,7 +61,8 @@ jobs:
                     nodes {
                       id
                       content { ... on PullRequest { id } }
-                      fieldValueByName(name: "Approvals") { ... on ProjectV2ItemFieldNumberValue { number } }
+                      app_val: fieldValueByName(name: "Approvals") { ... on ProjectV2ItemFieldNumberValue { number } }
+                      req_val: fieldValueByName(name: "Requested Changes") { ... on ProjectV2ItemFieldNumberValue { number } }
                     }
                   }
                 }
@@ -67,21 +70,23 @@ jobs:
             }' -f org="$ORG" -F num=$PROJECT_NUM)
 
           PROJECT_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.id')
-          FIELD_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Approvals") | .id')
+          APP_FIELD_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Approvals") | .id')
+          REQ_FIELD_ID=$(echo "$PROJECT_QUERY" | jq -r '.data.organization.projectV2.fields.nodes[] | select(.name == "Requested Changes") | .id')
+          
           ITEM_DATA=$(echo "$PROJECT_QUERY" | jq -r --arg PR_ID "$PR_NODE_ID" '.data.organization.projectV2.items.nodes[] | select(.content.id == $PR_ID)')
           ITEM_ID=$(echo "$ITEM_DATA" | jq -r '.id')
           
-          # Normalize current value (convert float 1.0 to int 1)
-          RAW_OLD=$(echo "$ITEM_DATA" | jq -r '.fieldValueByName.number // "None"')
-          [[ "$RAW_OLD" == "None" ]] && OLD_VALUE="None" || OLD_VALUE=$(printf "%.0f" "$RAW_OLD" 2>/dev/null || echo "0")
+          # Normalize Current Values (Handle float conversion to integers)
+          OLD_APP=$(echo "$ITEM_DATA" | jq -r '.app_val.number // 0 | floor')
+          OLD_REQ=$(echo "$ITEM_DATA" | jq -r '.req_val.number // 0 | floor')
 
-          # 4. CONSTRAINT: Only proceed if values differ
-          if [ "$OLD_VALUE" == "$APPROVAL_COUNT" ] && [ -n "$ITEM_ID" ]; then
-            echo "Approval count hasn't changed ($OLD_VALUE). Exiting."
+          # 4. CONSTRAINT: Skip only if both counts are unchanged AND it is not a manual/review event
+          if [ "$OLD_APP" == "$APP_COUNT" ] && [ "$OLD_REQ" == "$REQ_COUNT" ] && [ -n "$ITEM_ID" ] && [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "No changes detected in board state. Exiting."
             exit 0
           fi
 
-          # 5. Perform the Project Board Update
+          # 5. Add/Update Project Item
           if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" == "null" ]; then
             ITEM_ID=$(gh api graphql -f query='
               mutation($project: ID!, $content: ID!) {
@@ -89,25 +94,46 @@ jobs:
               }' -f project="$PROJECT_ID" -f content="$PR_NODE_ID" | jq -r '.data.addProjectV2ItemById.item.id')
           fi
 
+          # Update Approvals
           gh api graphql -f query='
             mutation($project: ID!, $item: ID!, $field: ID!, $val: Float!) {
-              updateProjectV2ItemFieldValue(input: {
-                projectId: $project, itemId: $item, fieldId: $field, value: { number: $val }
-              }) { clientMutationId }
-            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -F val=$APPROVAL_COUNT
+              updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { number: $val } }) { clientMutationId }
+            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$APP_FIELD_ID" -F val=$APP_COUNT
 
-          # 6. TRIGGER THE LOGGER MANUALLY
-          ACTION="updated"
-          [ "$APPROVAL_COUNT" -eq 0 ] && ACTION="cleared"
+          # Update Requested Changes
+          gh api graphql -f query='
+            mutation($project: ID!, $item: ID!, $field: ID!, $val: Float!) {
+              updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { number: $val } }) { clientMutationId }
+            }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$REQ_FIELD_ID" -F val=$REQ_COUNT
 
-          gh api /repos/${{ github.repository }}/dispatches \
-            -f event_type="project_field_updated" \
-            -f client_payload[field_name]="Approvals" \
-            -f client_payload[old_value]="$OLD_VALUE" \
-            -f client_payload[new_value]="$APPROVAL_COUNT" \
-            -f client_payload[content_node_id]="$PR_NODE_ID" \
-            -f client_payload[created_at]="$CREATED_AT" \
-            -f client_payload[changed_by]="${{ github.actor }}" \
-            -f client_payload[action_type]="$ACTION"
+          # 6. TRIGGER THE LOGGER (Individual dispatches for granular PR comments)
           
-          echo "Successfully synced $OLD_VALUE -> $APPROVAL_COUNT and triggered logger."
+          # Dispatch for Approvals
+          if [ "$OLD_APP" != "$APP_COUNT" ]; then
+            ACT_APP="updated"
+            [ "$APP_COUNT" -eq 0 ] && ACT_APP="cleared"
+            gh api /repos/${{ github.repository }}/dispatches \
+              -f event_type="project_field_updated" \
+              -f client_payload[field_name]="Approvals" \
+              -f client_payload[old_value]="$OLD_APP" \
+              -f client_payload[new_value]="$APP_COUNT" \
+              -f client_payload[content_node_id]="$PR_NODE_ID" \
+              -f client_payload[created_at]="$CREATED_AT" \
+              -f client_payload[changed_by]="${{ github.actor }}" \
+              -f client_payload[action_type]="$ACT_APP"
+          fi
+
+          # Dispatch for Requested Changes
+          if [ "$OLD_REQ" != "$REQ_COUNT" ]; then
+            ACT_REQ="updated"
+            [ "$REQ_COUNT" -eq 0 ] && ACT_REQ="cleared"
+            gh api /repos/${{ github.repository }}/dispatches \
+              -f event_type="project_field_updated" \
+              -f client_payload[field_name]="Requested Changes" \
+              -f client_payload[old_value]="$OLD_REQ" \
+              -f client_payload[new_value]="$REQ_COUNT" \
+              -f client_payload[content_node_id]="$PR_NODE_ID" \
+              -f client_payload[created_at]="$CREATED_AT" \
+              -f client_payload[changed_by]="${{ github.actor }}" \
+              -f client_payload[action_type]="$ACT_REQ"
+          fi
