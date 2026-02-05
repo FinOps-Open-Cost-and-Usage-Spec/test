@@ -14,13 +14,15 @@ on:
 
 jobs:
   sync:
-    # Adding concurrency is the final layer of protection.
-    # If two events DO happen at once, GitHub will cancel the first one.
     concurrency:
       group: sync-threads-${{ github.event.pull_request.id || 'bulk' }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
+      # Fix: Added checkout so 'gh' knows the repository context
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Calculate and Sync
         env:
           GH_TOKEN: ${{ secrets.PROJECT_PAT }}
@@ -50,8 +52,10 @@ jobs:
 
           # 2. Identify PRs
           if [ -n "$SINGLE_PR" ]; then
+            echo "Processing single PR: #$SINGLE_PR"
             PR_LIST=($SINGLE_PR)
           else
+            echo "Running bulk sync for all open PRs..."
             PR_LIST=($(gh pr list --state open --json number --jq '.[].number'))
           fi
 
@@ -59,6 +63,7 @@ jobs:
           for NUM in "${PR_LIST[@]}"; do
             echo "--- Processing PR #$NUM ---"
             
+            # Fetch Threads and Node ID
             PR_DATA=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $num: Int!) {
                 repository(owner: $org, name: $repo) {
@@ -70,10 +75,14 @@ jobs:
               }' -f org="$ORG" -f repo="${{ github.event.repository.name }}" -F num=$NUM)
 
             PR_NODE_ID=$(echo "$PR_DATA" | jq -r '.data.repository.pullRequest.id')
-            if [ -z "$PR_NODE_ID" ] || [ "$PR_NODE_ID" == "null" ]; then continue; fi
+            if [ -z "$PR_NODE_ID" ] || [ "$PR_NODE_ID" == "null" ]; then 
+              echo "PR #$NUM not found. Skipping."
+              continue
+            fi
 
             COUNT=$(echo "$PR_DATA" | jq -r '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length // 0')
 
+            # Find Project Item ID
             ITEM_ID=$(gh api graphql -f query='
               query($project: ID!) {
                 node(id: $project) {
@@ -90,6 +99,8 @@ jobs:
                     projectId: $project, itemId: $item, fieldId: $field, value: { number: $value }
                   }) { clientMutationId }
                 }' -f project="$PROJECT_ID" -f item="$ITEM_ID" -f field="$FIELD_ID" -F value=$COUNT
-              echo "Successfully updated PR #$NUM to $COUNT."
+              echo "Updated PR #$NUM: $COUNT threads."
+            else
+              echo "PR #$NUM not in project. Skipping."
             fi
           done
