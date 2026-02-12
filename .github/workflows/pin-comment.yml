@@ -12,9 +12,8 @@ jobs:
     
     runs-on: ubuntu-latest
     
-    # Explicitly elevating permissions for the token
+    # We must explicitly define these for the default GITHUB_TOKEN
     permissions:
-      contents: read
       issues: write
       pull-requests: write
 
