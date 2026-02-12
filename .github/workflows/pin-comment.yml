@@ -11,8 +11,12 @@ jobs:
       github.event.issue.pull_request == null
     
     runs-on: ubuntu-latest
+    
+    # Explicitly elevating permissions for the token
     permissions:
+      contents: read
       issues: write
+      pull-requests: write
 
     steps:
       - name: Pin the Status Update
@@ -20,7 +24,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMENT_ID: ${{ github.event.comment.id }}
         run: |
-          # We use the 'raw' API call to hit the pinning endpoint directly
           gh api \
             --method PUT \
             -H "Accept: application/vnd.github+json" \
