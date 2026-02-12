@@ -2,20 +2,21 @@ name: Auto-Pin Status Update
 
 on:
   issue_comment:
-    types: [created]
+    # Trigger on both new posts and edits
+    types: [created, edited]
 
 jobs:
   pin-status:
+    # 1. Match the specific Header + Emoji
+    # 2. Ensure it is an Issue (not a PR)
     if: |
       startsWith(github.event.comment.body, '## 🔄 Status Update') && 
       github.event.issue.pull_request == null
     
     runs-on: ubuntu-latest
     
-    # We must explicitly define these for the default GITHUB_TOKEN
     permissions:
       issues: write
-      pull-requests: write
 
     steps:
       - name: Pin the Status Update
@@ -23,6 +24,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMENT_ID: ${{ github.event.comment.id }}
         run: |
+          # The PUT method is idempotent, so if it is already pinned, 
+          # it will just refresh the pin or return a 204 No Content.
           gh api \
             --method PUT \
             -H "Accept: application/vnd.github+json" \
