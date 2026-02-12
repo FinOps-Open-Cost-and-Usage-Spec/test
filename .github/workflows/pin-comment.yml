@@ -1,0 +1,36 @@
+name: Auto-Pin Status Update
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  pin-status:
+    # 1. Only run if it starts with your specific header
+    # 2. Only run on Issues (not PRs) to prevent API failures
+    # 3. Optional: Only run if a human (not a bot) made the comment
+    if: |
+      startsWith(github.event.comment.body, '## 🔄 Status Update') && 
+      github.event.issue.pull_request == null &&
+      github.event.comment.user.type != 'Bot'
+    
+    runs-on: ubuntu-latest
+    
+    permissions:
+      issues: write
+
+    steps:
+      - name: Pin the Status Update
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_NODE_ID: ${{ github.event.comment.node_id }}
+        run: |
+          gh api graphql -f query='
+            mutation($id: ID!) {
+              pinIssueComment(input: {issueCommentId: $id}) {
+                issueComment {
+                  id
+                  body
+                }
+              }
+            }' -f id=$COMMENT_NODE_ID
