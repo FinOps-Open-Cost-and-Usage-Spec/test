@@ -6,16 +6,11 @@ on:
 
 jobs:
   pin-status:
-    # 1. Only run if it starts with your specific header
-    # 2. Only run on Issues (not PRs) to prevent API failures
-    # 3. Optional: Only run if a human (not a bot) made the comment
     if: |
       startsWith(github.event.comment.body, '## 🔄 Status Update') && 
-      github.event.issue.pull_request == null &&
-      github.event.comment.user.type != 'Bot'
+      github.event.issue.pull_request == null
     
     runs-on: ubuntu-latest
-    
     permissions:
       issues: write
 
@@ -23,14 +18,11 @@ jobs:
       - name: Pin the Status Update
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMENT_NODE_ID: ${{ github.event.comment.node_id }}
+          COMMENT_ID: ${{ github.event.comment.id }}
         run: |
-          gh api graphql -f query='
-            mutation($id: ID!) {
-              pinIssueComment(input: {issueCommentId: $id}) {
-                issueComment {
-                  id
-                  body
-                }
-              }
-            }' -f id=$COMMENT_NODE_ID
+          # We use the 'raw' API call to hit the pinning endpoint directly
+          gh api \
+            --method PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/issues/comments/$COMMENT_ID/pin
