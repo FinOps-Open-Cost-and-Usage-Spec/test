@@ -1,4 +1,4 @@
-name: Sync Review Counts to Project
+name: Sync PR Review Counts
 
 on:
   pull_request:
