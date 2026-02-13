@@ -84,6 +84,11 @@ jobs:
             APP_COUNT=$(echo "$REVIEWS_JSON" | jq 'map(select(.state == "APPROVED")) | length')
             REQ_COUNT=$(echo "$REVIEWS_JSON" | jq 'map(select(.state == "CHANGES_REQUESTED")) | length')
 
+            # DEBUG OUTPUT
+            echo "Debug: PR #$PR_NUM Review Summary"
+            echo "  - Approvals: $APP_COUNT"
+            echo "  - Changes Requested: $REQ_COUNT"
+
             # Get current board values
             ITEM_QUERY=$(gh api graphql -f query='
               query($org: String!, $num: Int!) {
