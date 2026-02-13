@@ -2,30 +2,26 @@ name: Auto-Pin Status Update
 
 on:
   issue_comment:
-    # Trigger on both new posts and edits
     types: [created, edited]
 
 jobs:
   pin-status:
-    # 1. Match the specific Header + Emoji
-    # 2. Ensure it is an Issue (not a PR)
+    # 1. Triggers on the exact Markdown header + emoji
+    # 2. Ensures we only attempt this on Issues (since PRs don't support pinning yet)
     if: |
       startsWith(github.event.comment.body, '## 🔄 Status Update') && 
       github.event.issue.pull_request == null
     
     runs-on: ubuntu-latest
-    
-    permissions:
-      issues: write
 
     steps:
       - name: Pin the Status Update
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use the Secret containing your focus-automation PAT
+          GITHUB_TOKEN: ${{ secrets.FOCUS_AUTOMATION_PAT }}
           COMMENT_ID: ${{ github.event.comment.id }}
         run: |
-          # The PUT method is idempotent, so if it is already pinned, 
-          # it will just refresh the pin or return a 204 No Content.
+          echo "Attempting to pin comment $COMMENT_ID..."
           gh api \
             --method PUT \
             -H "Accept: application/vnd.github+json" \
