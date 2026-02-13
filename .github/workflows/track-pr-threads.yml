@@ -1,4 +1,4 @@
-name: Sync PR Open Threads
+name: Sync PR Open Thread Counts
 on:
   schedule:
     - cron: '0 */4 * * *'
