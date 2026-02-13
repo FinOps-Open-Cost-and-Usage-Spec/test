@@ -20,7 +20,7 @@ jobs:
         env:
           # Using GH_TOKEN so the GitHub CLI can authenticate
           # Using your bot's PAT so it has 'Member' status
-          GH_TOKEN: ${{ secrets.FOCUS_AUTOMATION_PAT }}
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
           COMMENT_ID: ${{ github.event.comment.id }}
         run: |
           echo "Attempting to pin comment $COMMENT_ID as focus-automation..."
