@@ -15,17 +15,26 @@ on:
 jobs:
   sync_reviews:
     # UPDATED LOGIC: 
-    # 1. Always run for standard PR events (opened, synchronize, etc.)
-    # 2. For reviews, ONLY run if the state is 'approved' or 'changes_requested'
-    # This prevents the script from running on neutral "Comment" reviews.
-    if: |
-      github.event_name == 'pull_request' || 
-      (github.event.review && github.event.review.state != 'commented')
+    # Breaks down specific PR actions and Review states into clear lines
+    # to prevent double-triggering when a review is submitted.
+    if: >
+      (
+        github.event_name == 'pull_request' && (
+          github.event.action == 'opened' ||
+          github.event.action == 'synchronize' ||
+          github.event.action == 'reopened' ||
+          github.event.action == 'review_requested'
+        )
+      ) || 
+      (
+        github.event_name == 'pull_request_review' && 
+        github.event.review.state != 'commented'
+      )
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.PROJECT_PAT }}
       ORG: "FinOps-Open-Cost-and-Usage-Spec"
-      PROJECT_NUM: 7
+      PROJECT_NUM: 5
 
     steps:
       - name: Checkout Code
