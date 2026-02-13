@@ -2,7 +2,7 @@ name: Auto-Pin Status Update
 
 on:
   issue_comment:
-    # Trigger on both new posts and edits
+    # Trigger on both new posts and edited posts
     types: [created, edited]
 
 jobs:
