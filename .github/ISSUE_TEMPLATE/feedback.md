@@ -6,12 +6,10 @@ Recommended Labels: feedback, needs triage
 Suggested Assignee: @matt-cowsert
 ```
 
-_Use this template to report bugs in existing spec behavior, small corrections, or suggestions that improve clarity, accuracy, or consistency in the FOCUS Specification._
+_Use this template to report corrections, clarity improvements, or bugs in the FOCUS Specification._
 
 > **Not sure which template to use?**
 > If your suggestion involves **adding, changing, or removing a data field, label, or structure**, please submit a [Feature Request](../feature_request_template.md) instead.
->
-> **Found incorrect behavior in the current spec?** Select "Bug" below. These are prioritized for immediate triage.
 
 ---
 
