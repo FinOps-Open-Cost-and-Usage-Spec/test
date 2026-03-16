@@ -9,8 +9,8 @@ body:
       value: |
         _Use this form to report bugs in existing spec behavior, small corrections, or suggestions that improve clarity, accuracy, or consistency._
 
-        ⚠️ **Feature-related suggestions should be submitted via the Feature Request template instead.**
-        🐛 **Found incorrect behavior in the current spec? Select "Bug" below — these are prioritized for immediate triage.**
+        **Feature-related suggestions should be submitted via the Feature Request template instead.**
+        **Found incorrect behavior in the current spec? Select "Bug" below — these are prioritized for immediate triage.**
 
   - type: input
     id: organization
